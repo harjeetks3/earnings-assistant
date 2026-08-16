@@ -1,0 +1,65 @@
+{
+  "recordsTotal": 4,
+  "data": [
+    {
+      "id": "3512001",
+      "announcement_date": "16 Aug 2026",
+      "company": "MALAYAN BANKING BERHAD (1155)",
+      "stock_code": "1155",
+      "category": "Financial Results",
+      "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
+      "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512001",
+      "attachments": [
+        {
+          "filename": "MAYBANK-Q2FY2026-Results.pdf",
+          "url": "/misc/announcement/attachment/MAYBANK-Q2FY2026-Results.pdf"
+        }
+      ]
+    },
+    {
+      "id": "3512002",
+      "announcement_date": "16 Aug 2026",
+      "company": "CIMB GROUP HOLDINGS BERHAD (1023)",
+      "stock_code": "1023",
+      "category": "Financial Results",
+      "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
+      "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512002",
+      "attachments": [
+        {
+          "filename": "CIMB-Q2FY2026-Results.pdf",
+          "url": "/misc/announcement/attachment/CIMB-Q2FY2026-Results.pdf"
+        }
+      ]
+    },
+    {
+      "id": "3512003",
+      "announcement_date": "15 Aug 2026",
+      "company": "SOME UNTRACKED COMPANY BERHAD (9999)",
+      "stock_code": "9999",
+      "category": "Financial Results",
+      "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
+      "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512003",
+      "attachments": [
+        {
+          "filename": "UNTRACKED-Q2FY2026.pdf",
+          "url": "/misc/announcement/attachment/UNTRACKED-Q2FY2026.pdf"
+        }
+      ]
+    },
+    {
+      "id": "3512004",
+      "announcement_date": "14 Aug 2026",
+      "company": "MAXIS BERHAD (6012)",
+      "stock_code": "6012",
+      "category": "Financial Results",
+      "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
+      "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512004",
+      "attachments": [
+        {
+          "filename": "MAXIS-Q2FY2026-Results.pdf",
+          "url": "/misc/announcement/attachment/MAXIS-Q2FY2026-Results.pdf"
+        }
+      ]
+    }
+  ]
+}
