@@ -7,51 +7,62 @@ default test suite makes **no live requests** — these files are the only input
 
 | File | Source |
 |---|---|
-| `announcements_empty_live.json` | **REAL.** Captured 2026-08-16 from `/api/v1/announcements/search`. |
-| `robots.txt` | **REAL.** Captured 2026-08-16 from the live site. |
-| `announcements_objects.json` | **Synthetic.** Records-as-objects shape. |
-| `announcements_arrays.json` | **Synthetic.** DataTables positional shape. |
-| `announcements_listing.html` | **Synthetic.** HTML listing fallback. |
+| `announcements_live.json` | **REAL.** Captured 2026-08-16 from the site's own request. Truncated to 6 of 20 rows for size; untouched otherwise. |
+| `announcements_empty_live.json` | **REAL.** The same endpoint with no parameters — an empty result set. |
+| `robots.txt` | **REAL.** Captured 2026-08-16. |
+| `announcements_objects.json` | **Synthetic.** Records-as-objects shape, the only fixture with attachments on the listing. |
+| `announcements_arrays.json` | **Synthetic**, but modelled on the real layout. |
+| `announcements_listing.html` | **Synthetic.** HTML fallback; layout inferred, see below. |
 | `announcements_empty.json` | **Synthetic.** Valid response, no announcements. |
 | `announcements_malformed.json` | **Synthetic.** Endpoint-shape-changed case. |
 
-## What the real capture confirmed, and what it did not
+## The real shape, confirmed
 
-The live endpoint returned, verbatim:
+Request the site itself makes:
 
-```json
-{"recordsTotal":0,"recordsFiltered":0,"category_message":"","data":[]}
+```
+/api/v1/announcements/search?ann_type=company&company=&keyword=&dt_ht=&dt_lt=
+  &cat=&sub_type=&mkt=&sec=&subsec=&per_page=20&page=1&_=<cache-buster>
 ```
 
-**Confirmed:** the envelope. `data` is the announcement array — it is first in
-`bursa/parser.py::_ROOT_KEYS`, so the root-key handling is correct against the
-real service, not just against our own fixtures.
+Response: `{"recordsTotal":…,"recordsFiltered":…,"category_message":"","data":[…]}`,
+where each row is a **positional array**, not an object:
 
-**Still unverified:**
+| Index | Content |
+|---|---|
+| 0 | Row number the table renders — not data |
+| 1 | Date, rendered **twice** (a mobile `<div>` and a desktop one) |
+| 2 | Company, with the code in the link: `?stock_code=7212` |
+| 3 | Title, with the id in the link: `?ann_id=3695002`, sometimes followed by a `<p>` description |
 
-- **Row shape and field names.** `data` was empty, so nothing exercised
-  `FIELD_ALIASES` or `COLUMN_ORDER`. Those remain a documented best guess.
-- **The query parameters that return results.** The bare URL answers 200 with an
-  empty set. A guessed parameter set was refused with 403.
+Four things this corrected in the parser, each of which had been guessed wrong:
 
-## Getting the row shape
+- **`COLUMN_ORDER` was off by one** — it had no row-number column, so every field
+  landed one place to the left.
+- **There is no category column.** Category is a query filter (`cat=`), not a field,
+  so `announcement_type` is always `None` and the results filter works off the title.
+- **Stock codes are not always numeric** — ETFs use forms like `0823EA`. They come
+  from the link's query string, not from a parenthesised suffix.
+- **The listing carries no attachments at all.** The PDF is on the announcement's
+  own page, so the pipeline fetches that page for matched announcements only.
 
-Cloudflare sits in front of the site and refuses some automated requests — the
-HTML announcements page 403s even though `robots.txt` permits it. Guessing
-parameters against a WAF is not something to automate, so the remaining step is
-a human one:
+## Still unverified
 
-1. Open the announcements page in your browser and filter to *Financial Results*.
-2. Open DevTools → Network, and find the `search` request the page itself makes.
-3. Copy the full URL, and *Copy response*.
-4. Save the response here as `announcements_live.json`, put the query string into
-   `listing_params` in `poll_bursa.py`, and reconcile `FIELD_ALIASES` /
-   `COLUMN_ORDER` against the real rows.
+- **The `cat=` value for financial results.** Left empty, so the listing returns
+  every announcement type and the results filter runs client-side on the title.
+  Supplying it would cut the volume considerably.
+- **Whether `dt_ht` / `dt_lt` are date-from and date-to**, and in which order.
+  `--since` therefore filters client-side.
+- **The HTML fallback layout.** The rendered announcements page returns 403 to
+  automated clients (Cloudflare), so `announcements_listing.html` mirrors the
+  JSON column order rather than a captured page.
+- **The detail page structure.** `parse_attachment_page()` accepts any `.pdf`
+  link or embed rather than assuming a fixed attachment path.
 
-That is you reading your own browser session, which needs no permission from
-anyone, and it yields both the correct parameters and the true row shape in one
-step. `ParserError` reports the keys it actually saw, so a mismatch tells you
-exactly what to change.
+To pin any of these down, repeat the capture: open the announcements page,
+filter to *Financial Results*, and read the `search` request in DevTools →
+Network. That is you reading your own browser session, and it needs no
+permission from anyone.
 
 ## Two shapes on purpose
 

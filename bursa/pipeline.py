@@ -13,7 +13,7 @@ import re
 
 from . import dedup, watchlist
 from .client import BlockedError, BursaClientError, RequestBudgetExceeded
-from .parser import ParserError, parse_html, parse_json
+from .parser import ParserError, parse_attachment_page, parse_html, parse_json
 from .verify import VERIFIED, verify_pdf_bytes
 
 # Only announcements that look like results filings are worth queueing. Kept
@@ -44,8 +44,9 @@ class PollSummary(dict):
     """Counters for one run, printed by the CLI and easy to assert on."""
 
     FIELDS = ("fetched", "parsed", "results_filings", "watchlisted", "new_announcements",
-              "attachments_seen", "downloaded", "verified", "rejected",
-              "already_ingested", "skipped_existing", "errors")
+              "detail_pages_fetched", "attachments_seen", "downloaded", "verified",
+              "rejected", "already_ingested", "skipped_existing", "no_attachment",
+              "errors")
 
     def __init__(self):
         super().__init__({f: 0 for f in self.FIELDS})
@@ -59,36 +60,51 @@ def run_poll(db, client, *, since: str | None = None, limit: int | None = None,
              dry_run: bool = False, attachments_folder: str,
              listing_path: str = "/api/v1/announcements/search",
              listing_params: dict | None = None,
-             use_html: bool = False) -> PollSummary:
+             use_html: bool = False, pages: int = 1) -> PollSummary:
     """One polling pass. Returns a PollSummary; never raises for ordinary
     failures — a monitor that dies on a bad row is worse than one that reports
     it. BlockedError is the exception: it stops the run immediately."""
     summary = PollSummary()
+    announcements = []
 
-    # ---- fetch ----
-    try:
-        payload = client.fetch(listing_path, listing_params)
-        summary["fetched"] = 1
-    except BlockedError as exc:
-        summary.note(f"BLOCKED: {exc}")
-        summary["errors"] += 1
-        return summary
-    except (BursaClientError, RequestBudgetExceeded) as exc:
-        summary.note(f"Fetch failed: {exc}")
-        summary["errors"] += 1
-        return summary
+    # ---- fetch + parse, one listing page at a time ----
+    # The listing is not filtered by category, so a single page covers only the
+    # most recent handful of announcements of every kind. Walking a couple of
+    # pages gives an hourly poll enough headroom during results season.
+    for page in range(1, max(1, pages) + 1):
+        params = dict(listing_params or {})
+        if params:
+            params["page"] = page
+        elif page > 1:
+            break
 
-    # ---- parse ----
-    try:
-        announcements = parse_html(payload) if use_html else parse_json(payload)
-    except ParserError as exc:
-        summary.note(
-            f"PARSER: {exc}\n"
-            f"  The endpoint shape has probably changed. Save this response as a "
-            f"fixture and reconcile bursa/parser.py FIELD_ALIASES / COLUMN_ORDER."
-        )
-        summary["errors"] += 1
-        return summary
+        try:
+            payload = client.fetch(listing_path, params or None)
+            summary["fetched"] += 1
+        except BlockedError as exc:
+            summary.note(f"BLOCKED: {exc}")
+            summary["errors"] += 1
+            return summary
+        except (BursaClientError, RequestBudgetExceeded) as exc:
+            summary.note(f"Fetch failed on page {page}: {exc}")
+            summary["errors"] += 1
+            break
+
+        try:
+            batch = parse_html(payload) if use_html else parse_json(payload)
+        except ParserError as exc:
+            summary.note(
+                f"PARSER: {exc}\n"
+                f"  The endpoint shape has probably changed. Save this response as a "
+                f"fixture and reconcile bursa/parser.py COLUMN_ORDER / FIELD_ALIASES."
+            )
+            summary["errors"] += 1
+            break
+
+        announcements.extend(batch)
+        if not batch:
+            break  # ran past the end of the results
+
     summary["parsed"] = len(announcements)
 
     if since:
@@ -153,14 +169,33 @@ def _process_one(db, client, announcement, company, summary, *,
             "SELECT COUNT(*) FROM attachments WHERE announcement_id = ?",
             (announcement_id,),
         ).fetchone()[0]
-        if stored >= len(announcement.attachments):
+        # The listing does not say how many files an announcement has, so once
+        # anything is stored, treat it as handled. A first pass that found none
+        # (text-only announcement, or a failed detail fetch) is retried.
+        if stored:
             return
         summary.note(
             f"retrying {len(announcement.attachments) - stored} missing attachment(s) "
             f"for previously discovered {announcement.title[:60]!r}"
         )
 
-    for attachment in announcement.attachments:
+    # The listing carries date, company and title only — no files. The PDF is on
+    # the announcement's own page, so fetch it, but only for the handful of
+    # announcements that survived the results filter and the watchlist.
+    attachments = announcement.attachments
+    if not attachments and announcement.url:
+        detail = client.fetch(announcement.url)
+        summary["detail_pages_fetched"] += 1
+        attachments = parse_attachment_page(detail)
+        if not attachments:
+            summary["no_attachment"] += 1
+            summary.note(
+                f"no PDF linked from {announcement.title[:60]!r} "
+                f"({announcement.url}) — nothing to queue"
+            )
+            return
+
+    for attachment in attachments:
         summary["attachments_seen"] += 1
         data = client.fetch(attachment.url)
         summary["downloaded"] += 1

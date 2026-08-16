@@ -1,29 +1,31 @@
 {
   "recordsTotal": 4,
+  "recordsFiltered": 4,
+  "category_message": "",
   "data": [
     [
-      "16 Aug 2026",
-      "MALAYAN BANKING BERHAD (1155)",
-      "<a href=\"/market_information/announcements/company_announcement/announcement_details?ann_id=3512001\">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><br><a href=\"/misc/announcement/attachment/MAYBANK-Q2FY2026-Results.pdf\">MAYBANK-Q2FY2026-Results.pdf</a>",
-      "Financial Results"
+      1,
+      "<div class='d-lg-none'>16 Aug<br/>2026</div><div class='d-lg-inline-block d-none'>16 Aug 2026</div>",
+      "<a href='/trade/trading_resources/listing_directory/company-profile?stock_code=1155' target=_blank>MALAYAN BANKING BERHAD</a>",
+      "<a href='/market_information/announcements/company_announcement/announcement_details?ann_id=3512001' target=_blank>Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a>"
     ],
     [
-      "16 Aug 2026",
-      "CIMB GROUP HOLDINGS BERHAD (1023)",
-      "<a href=\"/market_information/announcements/company_announcement/announcement_details?ann_id=3512002\">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><br><a href=\"/misc/announcement/attachment/CIMB-Q2FY2026-Results.pdf\">CIMB-Q2FY2026-Results.pdf</a>",
-      "Financial Results"
+      2,
+      "<div class='d-lg-none'>16 Aug<br/>2026</div><div class='d-lg-inline-block d-none'>16 Aug 2026</div>",
+      "<a href='/trade/trading_resources/listing_directory/company-profile?stock_code=1023' target=_blank>CIMB GROUP HOLDINGS BERHAD</a>",
+      "<a href='/market_information/announcements/company_announcement/announcement_details?ann_id=3512002' target=_blank>Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a>"
     ],
     [
-      "15 Aug 2026",
-      "SOME UNTRACKED COMPANY BERHAD (9999)",
-      "<a href=\"/market_information/announcements/company_announcement/announcement_details?ann_id=3512003\">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><br><a href=\"/misc/announcement/attachment/UNTRACKED-Q2FY2026.pdf\">UNTRACKED-Q2FY2026.pdf</a>",
-      "Financial Results"
+      3,
+      "<div class='d-lg-none'>15 Aug<br/>2026</div><div class='d-lg-inline-block d-none'>15 Aug 2026</div>",
+      "<a href='/trade/trading_resources/listing_directory/company-profile?stock_code=9999' target=_blank>SOME UNTRACKED COMPANY BERHAD</a>",
+      "<a href='/market_information/announcements/company_announcement/announcement_details?ann_id=3512003' target=_blank>Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a>"
     ],
     [
-      "14 Aug 2026",
-      "MAXIS BERHAD (6012)",
-      "<a href=\"/market_information/announcements/company_announcement/announcement_details?ann_id=3512004\">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><br><a href=\"/misc/announcement/attachment/MAXIS-Q2FY2026-Results.pdf\">MAXIS-Q2FY2026-Results.pdf</a>",
-      "Financial Results"
+      4,
+      "<div class='d-lg-none'>14 Aug<br/>2026</div><div class='d-lg-inline-block d-none'>14 Aug 2026</div>",
+      "<a href='/trade/trading_resources/listing_directory/company-profile?stock_code=6012' target=_blank>MAXIS BERHAD</a>",
+      "<a href='/market_information/announcements/company_announcement/announcement_details?ann_id=3512004' target=_blank>Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a>"
     ]
   ]
 }

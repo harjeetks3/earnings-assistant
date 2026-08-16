@@ -48,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Which fixture file to treat as the listing response")
     p.add_argument("--html", action="store_true",
                    help="Parse the listing as HTML instead of JSON (fallback)")
+    p.add_argument("--per-page", type=int, default=20,
+                   help="Listing rows per request (20 is the value the site itself uses)")
+    p.add_argument("--pages", type=int, default=2,
+                   help="Listing pages to walk per run")
     p.add_argument("--user-agent", default=DEFAULT_USER_AGENT,
                    help="Override the identifying User-Agent (keep a contact address in it)")
     p.add_argument("--cache-dir", default=os.path.join(BASE_DIR, "bursa_cache"),
@@ -75,6 +79,20 @@ def main(argv=None) -> int:
         print(f"[poll] min {client.min_delay}s between requests, "
               f"max {client.max_requests} requests this run")
 
+    # Exactly the parameters the site's own announcements page sends, observed
+    # in the browser's network tab on 2026-08-16. Empty values are kept because
+    # the endpoint expects the keys to be present. `_` is a cache-buster the
+    # page adds and is deliberately omitted.
+    listing_params = {
+        "ann_type": "company",
+        "company": "", "keyword": "",
+        "dt_ht": "", "dt_lt": "",
+        "cat": "", "sub_type": "",
+        "mkt": "", "sec": "", "subsec": "",
+        "per_page": args.per_page,
+        "page": 1,
+    }
+
     with app.app.app_context():
         db = app.get_db()
         summary = pipeline.run_poll(
@@ -83,6 +101,8 @@ def main(argv=None) -> int:
             limit=args.limit,
             dry_run=args.dry_run,
             attachments_folder=app.ATTACHMENTS_FOLDER,
+            listing_params=listing_params,
+            pages=args.pages,
             use_html=args.html,
         )
 

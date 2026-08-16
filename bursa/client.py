@@ -228,11 +228,21 @@ class FixtureClient:
     end in a test without a single request leaving the machine.
     """
 
+    # The real listing links to an announcement page rather than to files, so a
+    # fixture run has to be able to serve that page too or the detail-fetch step
+    # goes untested. `detail_pdf` controls whether the stand-in page links a PDF.
+    DETAIL_TEMPLATE = (
+        "<html><body><h1>Announcement</h1>"
+        "<a href='/market_information/announcements/company_announcement'>Back</a>"
+        "{pdf}</body></html>"
+    )
+
     def __init__(self, fixture_dir: str, *, listing: str = "announcements_objects.json",
-                 sample_pdf: str | None = None):
+                 sample_pdf: str | None = None, detail_pdf: bool = True):
         self.fixture_dir = fixture_dir
         self.listing = listing
         self.sample_pdf = sample_pdf
+        self.detail_pdf = detail_pdf
         self.requests_made = 0
         self.base_url = "fixture://"
 
@@ -243,6 +253,7 @@ class FixtureClient:
               *, cache_name: str | None = None) -> bytes:
         self.requests_made += 1
         target = path_or_url.lower().split("?")[0]
+
         if target.endswith(".pdf"):
             if not self.sample_pdf:
                 raise BursaClientError(
@@ -250,6 +261,18 @@ class FixtureClient:
                 )
             with open(self.sample_pdf, "rb") as f:
                 return f.read()
+
+        if "announcement_details" in path_or_url:
+            ann_id = path_or_url.rsplit("=", 1)[-1]
+            pdf = (f"<a href='/misc/announcement/attachment/ann_{ann_id}.pdf'>"
+                   f"ann_{ann_id}.pdf</a>") if self.detail_pdf else ""
+            return self.DETAIL_TEMPLATE.format(pdf=pdf).encode("utf-8")
+
+        # Only page 1 has fixture data. Replaying it for every page would make a
+        # fixture run report duplicate announcements that a real run would not.
+        if params and int(params.get("page", 1) or 1) > 1:
+            return b'{"recordsTotal":0,"recordsFiltered":0,"category_message":"","data":[]}'
+
         path = os.path.join(self.fixture_dir, self.listing)
         if not os.path.exists(path):
             raise BursaClientError(f"Fixture not found: {path}")

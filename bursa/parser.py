@@ -49,8 +49,12 @@ FIELD_ALIASES = {
     "url":               ("url", "link", "href", "detail_url"),
 }
 
-# Positional layout for shape B.
-COLUMN_ORDER = ("announced_at", "company_name", "title", "announcement_type")
+# Positional layout for shape B, confirmed against a real response captured
+# 2026-08-16 (tests/fixtures/bursa/announcements_live.json). Column 0 is the
+# row number the table renders, not data — None means "ignore this column".
+# There is no category column: the listing carries only date, company and
+# title, and the category is a query filter (`cat=`) rather than a field.
+COLUMN_ORDER = (None, "announced_at", "company_name", "title")
 
 _ROOT_KEYS = ("data", "records", "results", "items", "announcements")
 
@@ -149,15 +153,27 @@ def _headline_from_cell(cell) -> str:
     return strip_tags(text)
 
 
+# The company cell links to the company profile, carrying the code in the query
+# string: .../company-profile?stock_code=7212. Codes are not always numeric --
+# ETFs use forms like 0823EA -- so this must not assume digits.
+_STOCK_CODE_RE = re.compile(r"stock_code=([A-Za-z0-9]+)", re.I)
+_PARENTHESISED_CODE_RE = re.compile(r"\(([0-9]{4,5}[A-Za-z]{0,2})\)")
+
+
 def _stock_code_from(record: dict, *cells) -> str | None:
-    """Bursa often prints the code alongside the name, e.g. "ACME BERHAD (1234)".
-    Try the explicit field first, then dig it out of the rendered text."""
+    """Explicit field first, then the stock_code query parameter on the company
+    link, then a parenthesised code in the rendered text."""
     explicit = _first(record, FIELD_ALIASES["stock_code"])
     if explicit:
         return strip_tags(explicit) or None
-    import re
     for cell in cells:
-        match = re.search(r"\((\d{4,5})\)", strip_tags(cell))
+        if cell is None:
+            continue
+        match = _STOCK_CODE_RE.search(str(cell))
+        if match:
+            return match.group(1)
+    for cell in cells:
+        match = _PARENTHESISED_CODE_RE.search(strip_tags(cell))
         if match:
             return match.group(1)
     return None
@@ -213,27 +229,36 @@ def _parse_attachment_list(value) -> tuple[Attachment, ...]:
 def _announcement_from_array(cells: list) -> Announcement:
     record = {}
     for index, name in enumerate(COLUMN_ORDER):
+        if name is None:          # a rendered row number, not data
+            continue
         record[name] = cells[index] if index < len(cells) else None
-    title = _headline_from_cell(record.get("title"))
+
+    title_cell = record.get("title")
+    company_cell = record.get("company_name")
+    title = _headline_from_cell(title_cell)
     if not title:
         raise ParserError(
             f"Positional record has no title in column {COLUMN_ORDER.index('title')}. "
             f"Row had {len(cells)} cell(s): {[strip_tags(c)[:40] for c in cells]}"
         )
-    attachments = ()
-    for cell in cells:
-        attachments = attachments or _extract_links(cell)
-    detail_url = next((href for href, _ in _all_links(cells)
-                       if not href.lower().split("?")[0].endswith(".pdf")), None)
+
+    # The announcement link lives in the title cell; the company cell links to a
+    # company profile. Taking the first link in the row would grab the wrong one
+    # and lose the announcement id with it.
+    detail_url = next(
+        (href for href, _ in _all_links([title_cell])
+         if not href.lower().split("?")[0].endswith(".pdf")),
+        None,
+    )
     return Announcement(
         title=title,
-        stock_code=_stock_code_from({}, record.get("company_name"), *cells),
-        company_name=strip_tags(record.get("company_name")) or None,
+        stock_code=_stock_code_from({}, company_cell, *cells),
+        company_name=_headline_from_cell(company_cell) or None,
         announcement_type=strip_tags(record.get("announcement_type")) or None,
         announced_at=normalise_date(record.get("announced_at")),
         url=detail_url,
         bursa_id=_bursa_id_from_url(detail_url),
-        attachments=attachments,
+        attachments=_extract_links(title_cell),
         raw={"cells": [str(c) for c in cells]},
     )
 
@@ -285,6 +310,73 @@ def parse_json(payload) -> list[Announcement]:
         else:
             raise ParserError(f"Unsupported row type: {type(row).__name__}")
     return out
+
+
+class _AllLinkCollector(HTMLParser):
+    """Every href and iframe/embed src on a page, in document order."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "a":
+            self._href = attributes.get("href")
+            self._text = []
+        elif tag in ("iframe", "embed", "object"):
+            src = attributes.get("src") or attributes.get("data")
+            if src:
+                self.links.append((src, ""))
+
+    handle_startendtag = handle_starttag
+
+    def handle_data(self, data):
+        if self._href is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._href:
+            self.links.append((self._href, "".join(self._text).strip()))
+            self._href, self._text = None, []
+
+
+def parse_attachment_page(payload) -> tuple[Attachment, ...]:
+    """PDF attachments linked from an announcement detail page.
+
+    The listing endpoint returns only date, company and title — no files — so
+    the PDF has to come from the announcement's own page. Any .pdf target is
+    treated as a candidate rather than assuming a fixed attachment path, since
+    that path is not something we have verified.
+
+    Returns () rather than raising: an announcement with no PDF is ordinary
+    (many are text-only), and must not read as a parser failure.
+    """
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode("utf-8", errors="replace")
+    if not isinstance(payload, str):
+        return ()
+
+    collector = _AllLinkCollector()
+    try:
+        collector.feed(payload)
+    except Exception:
+        return ()
+
+    seen, out = set(), []
+    for href, label in collector.links:
+        if not href or not href.lower().split("?")[0].endswith(".pdf"):
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        out.append(Attachment(
+            filename=(label or href.split("?")[0].rsplit("/", 1)[-1]).strip(),
+            url=href,
+        ))
+    return tuple(out)
 
 
 class _TableParser(HTMLParser):

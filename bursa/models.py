@@ -34,6 +34,18 @@ def strip_tags(value) -> str:
     return _WS_RE.sub(" ", text).strip()
 
 
+# Bursa's date cell renders the date TWICE, once for mobile and once for
+# desktop, so flattening it yields "14 Aug 2026 14 Aug 2026". Matching a date
+# anywhere in the text rather than requiring the whole cell to be one is what
+# makes that work.
+_DATE_SEARCH_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}"
+    r"|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}"
+    r"|\d{1,2}[/-][A-Za-z]{3,9}[/-]\d{4}"
+    r"|\d{1,2}[/-]\d{1,2}[/-]\d{4}"
+)
+
+
 def normalise_date(value) -> str | None:
     """Return an ISO date string, or None if the value cannot be understood.
 
@@ -45,14 +57,24 @@ def normalise_date(value) -> str | None:
         return None
     # Some cells carry a time or a trailing note after the date.
     text = text.split("|")[0].strip()
+
     for fmt in _DATE_FORMATS:
         try:
             return datetime.strptime(text, fmt).date().isoformat()
         except ValueError:
             continue
-    # Last resort: a leading ISO date inside a longer string.
-    match = re.match(r"(\d{4}-\d{2}-\d{2})", text)
-    return match.group(1) if match else None
+
+    # Not a bare date: pull the first date-shaped run out of the surrounding text.
+    for match in _DATE_SEARCH_RE.finditer(text):
+        candidate = match.group(0)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
+            return candidate
+        for fmt in _DATE_FORMATS:
+            try:
+                return datetime.strptime(candidate, fmt).date().isoformat()
+            except ValueError:
+                continue
+    return None
 
 
 @dataclass(frozen=True)

@@ -67,14 +67,18 @@ check("html listing parsed", len(htmls) == 4, f"got {len(htmls)}")
 def comparable(a):
     """Every field each shape must agree on, INCLUDING bursa_id.
 
-    The id matters most: the JSON payload carries it explicitly while the
+    The id matters most: an object payload carries it explicitly while the
     positional and HTML shapes only have it inside the detail link. If it were
     not recovered from the URL, the same announcement would get a different
     dedup key per shape and falling back to HTML would re-queue everything
     already discovered.
+
+    Attachments are excluded: the real listing carries no file links at all
+    (they live on the announcement's detail page), so only the object shape
+    has any. That is checked separately.
     """
-    return (a.stock_code, a.company_name, a.title, a.announcement_type,
-            a.announced_at, a.bursa_id, tuple(att.url for att in a.attachments))
+    return (a.stock_code, a.company_name, a.title,
+            a.announced_at, a.bursa_id)
 
 
 check("objects and arrays agree field-for-field",
@@ -127,7 +131,72 @@ check("detail url is not the pdf",
 print("\nparser: empty is not the same as broken")
 check("empty payload returns []", parse_json(fixture("announcements_empty.json")) == [])
 
-print("\nparser: the REAL captured response parses (envelope confirmed live)")
+print("\nparser: the REAL captured response, field by field")
+# Captured from the live endpoint 2026-08-16 via the site's own network tab.
+# This is the ground truth for COLUMN_ORDER: [row number, date, company, title],
+# with no category column, the stock code in the company link's query string,
+# and the announcement id in the title link's.
+live = parse_json(fixture("announcements_live.json"))
+check("all six rows parsed", len(live) == 6, str(len(live)))
+
+by_code = {a.stock_code: a for a in live}
+check("stock codes read from the company link",
+      sorted(by_code) == ["0823EA", "4634", "5169", "5878", "7212", "7854"],
+      str(sorted(by_code)))
+check("alphanumeric codes survive (ETFs are not 4 digits)", "0823EA" in by_code)
+
+pos = by_code.get("4634")
+check("company name is clean text", pos and pos.company_name == "POS MALAYSIA BERHAD",
+      repr(pos.company_name if pos else None))
+check("date parsed despite being rendered twice for mobile and desktop",
+      pos and pos.announced_at == "2026-08-14", repr(pos.announced_at if pos else None))
+check("announcement id read from the title link",
+      pos and pos.bursa_id == "3695004", repr(pos.bursa_id if pos else None))
+check("url is the announcement, not the company profile",
+      pos and "announcement_details" in (pos.url or ""), repr(pos.url if pos else None))
+check("title is the headline",
+      pos and pos.title == "Quarterly rpt on consolidated results for the "
+                           "financial period ended 30/06/2026",
+      repr(pos.title if pos else None))
+
+hohup = by_code.get("5169")
+check("a trailing <p> description is not folded into the title",
+      hohup and hohup.title.endswith("SPECIAL ADMINISTRATOR"),
+      repr(hohup.title if hohup else None))
+
+check("the real listing carries no attachments (they are on the detail page)",
+      all(not a.attachments for a in live))
+
+print("\npipeline: the results filter picks the quarterly report out of the noise")
+from bursa.pipeline import looks_like_results  # noqa: E402
+
+results = [a for a in live if looks_like_results(a)]
+check("exactly one results filing among the six", len(results) == 1, str(len(results)))
+check("and it is the POS Malaysia quarterly report",
+      results and results[0].stock_code == "4634",
+      str([r.stock_code for r in results]))
+check("boardroom changes are not mistaken for results",
+      not any("Boardroom" in r.title for r in results))
+
+print("\nparser: attachments come from the announcement detail page")
+from bursa.parser import parse_attachment_page  # noqa: E402
+
+DETAIL = """<html><body>
+  <h1>Quarterly rpt on consolidated results</h1>
+  <a href="/market_information/announcements/company_announcement/x">Back</a>
+  <a href="/misc/announcement/attachment/POS-Q2FY2026.pdf">POS-Q2FY2026.pdf</a>
+  <iframe src="/misc/announcement/attachment/POS-Q2FY2026.pdf"></iframe>
+</body></html>"""
+found = parse_attachment_page(DETAIL)
+check("the PDF is found", len(found) == 1, str(found))
+check("and the same file linked twice is not queued twice", len(found) == 1)
+check("non-PDF links are ignored",
+      found and found[0].url.endswith("POS-Q2FY2026.pdf"), str(found))
+check("a page with no PDF returns empty rather than raising",
+      parse_attachment_page("<html><body>text only</body></html>") == ())
+check("junk input does not raise", parse_attachment_page(None) == ())
+
+print("\nparser: the REAL empty response (envelope confirmed live)")
 # Captured 2026-08-16 from the live endpoint. It came back empty, so this
 # confirms the envelope -- 'data' really is the announcement array -- but not
 # the row shape. See tests/fixtures/bursa/README.md.

@@ -125,6 +125,46 @@ with app.app.app_context():
     check("still two attachment rows",
           db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2)
 
+    print("\nthe REAL listing shape works end to end (files come from the detail page):")
+    # The live listing carries only date, company and title. The PDF has to be
+    # fetched from the announcement's own page, so this exercises the extra hop
+    # the real endpoint requires.
+    db.execute("DELETE FROM attachments")
+    db.execute("DELETE FROM announcements")
+    db.commit()
+    db.execute("INSERT OR IGNORE INTO companies (stock_code, name, is_active, source, added_at) "
+               "VALUES ('4634','Pos Malaysia Berhad',1,'test','2026-08-16T00:00:00Z')")
+    db.commit()
+
+    live_client = FixtureClient(FIXTURES, listing="announcements_live.json",
+                                sample_pdf=SAMPLE)
+    sl = pipeline.run_poll(db, live_client, attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("all six live rows parsed", sl["parsed"] == 6, str(sl["parsed"]))
+    check("only the quarterly report is a results filing", sl["results_filings"] == 1,
+          str(sl["results_filings"]))
+    check("and only the watchlisted company matched", sl["watchlisted"] == 1,
+          str(sl["watchlisted"]))
+    check("the detail page was fetched for it", sl["detail_pages_fetched"] == 1,
+          str(sl["detail_pages_fetched"]))
+    check("the PDF was downloaded and verified", sl["verified"] == 1, str(dict(sl)))
+    check("no errors", sl["errors"] == 0, str(sl["messages"]))
+    check("detail pages were NOT fetched for the five non-matching rows",
+          sl["detail_pages_fetched"] == 1,
+          "fetching a page per announcement would multiply the request count")
+
+    print("\nan announcement with no PDF is recorded and not retried forever:")
+    db.execute("DELETE FROM attachments")
+    db.execute("DELETE FROM announcements")
+    db.commit()
+    bare = FixtureClient(FIXTURES, listing="announcements_live.json",
+                         sample_pdf=SAMPLE, detail_pdf=False)
+    sn = pipeline.run_poll(db, bare, attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("it is counted, not treated as an error",
+          sn["no_attachment"] == 1 and sn["errors"] == 0, str(dict(sn)))
+    check("nothing was queued", sn["verified"] == 0, str(sn["verified"]))
+    check("the announcement is still recorded",
+          db.execute("SELECT COUNT(*) FROM announcements").fetchone()[0] == 1)
+
     print("\na download that failed once is retried, not stranded:")
     # The announcement row is written before its attachments are fetched, so a
     # transient failure would otherwise leave the filing permanently invisible:

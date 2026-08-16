@@ -1,35 +1,41 @@
-<!-- SYNTHETIC fixture: HTML listing fallback for when the JSON endpoint is unavailable.
-     Same four announcements as the JSON fixtures. -->
+<!-- SYNTHETIC fixture: HTML listing fallback for when the JSON endpoint is
+     unavailable. Columns mirror the real JSON layout (row number, date,
+     company, title) so both surfaces normalise through the same COLUMN_ORDER.
+     Same four announcements as the JSON fixtures.
+
+     NOTE: the live HTML announcements page is behind Cloudflare and returns 403
+     to automated clients, so this layout is inferred from the JSON response,
+     not captured. See README.md. -->
 <html>
 <body>
   <table class="announcements-table">
     <thead>
-      <tr><th>Announcement Date</th><th>Company Name</th><th>Title</th><th>Category</th></tr>
+      <tr><th>#</th><th>Announcement Date</th><th>Company Name</th><th>Title</th></tr>
     </thead>
     <tbody>
       <tr>
+        <td>1</td>
         <td>16 Aug 2026</td>
-        <td>MALAYAN BANKING BERHAD (1155)</td>
-        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512001">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><a href="/misc/announcement/attachment/MAYBANK-Q2FY2026-Results.pdf">MAYBANK-Q2FY2026-Results.pdf</a></td>
-        <td>Financial Results</td>
+        <td><a href="/trade/trading_resources/listing_directory/company-profile?stock_code=1155">MALAYAN BANKING BERHAD</a></td>
+        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512001">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a></td>
       </tr>
       <tr>
+        <td>2</td>
         <td>16 Aug 2026</td>
-        <td>CIMB GROUP HOLDINGS BERHAD (1023)</td>
-        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512002">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><a href="/misc/announcement/attachment/CIMB-Q2FY2026-Results.pdf">CIMB-Q2FY2026-Results.pdf</a></td>
-        <td>Financial Results</td>
+        <td><a href="/trade/trading_resources/listing_directory/company-profile?stock_code=1023">CIMB GROUP HOLDINGS BERHAD</a></td>
+        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512002">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a></td>
       </tr>
       <tr>
+        <td>3</td>
         <td>15 Aug 2026</td>
-        <td>SOME UNTRACKED COMPANY BERHAD (9999)</td>
-        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512003">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><a href="/misc/announcement/attachment/UNTRACKED-Q2FY2026.pdf">UNTRACKED-Q2FY2026.pdf</a></td>
-        <td>Financial Results</td>
+        <td><a href="/trade/trading_resources/listing_directory/company-profile?stock_code=9999">SOME UNTRACKED COMPANY BERHAD</a></td>
+        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512003">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a></td>
       </tr>
       <tr>
+        <td>4</td>
         <td>14 Aug 2026</td>
-        <td>MAXIS BERHAD (6012)</td>
-        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512004">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a><a href="/misc/announcement/attachment/MAXIS-Q2FY2026-Results.pdf">MAXIS-Q2FY2026-Results.pdf</a></td>
-        <td>Financial Results</td>
+        <td><a href="/trade/trading_resources/listing_directory/company-profile?stock_code=6012">MAXIS BERHAD</a></td>
+        <td><a href="/market_information/announcements/company_announcement/announcement_details?ann_id=3512004">Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026</a></td>
       </tr>
     </tbody>
   </table>

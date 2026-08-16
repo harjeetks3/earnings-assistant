@@ -269,6 +269,16 @@ identical records — including the announcement id, which the positional and HT
 inside the detail link. Recovering it is what keeps the dedup key stable across shapes; without
 that, falling back to HTML would re-queue everything already discovered.
 
+**The live shape is confirmed** against a response captured on 2026-08-16
+(`tests/fixtures/bursa/announcements_live.json`). Rows are positional arrays:
+`[row number, date, company, title]` — no category column, the stock code in the company link's
+query string, the announcement id in the title link's, and the date rendered twice for responsive
+layout. Codes are not always numeric (ETFs use `0823EA`).
+
+**The listing carries no attachments.** The PDF lives on the announcement's own page, so
+`_process_one()` fetches that page — but only for announcements that already survived the results
+filter and the watchlist, so it is a handful of extra requests, not one per announcement.
+
 `ParserError` is raised rather than returning `[]`, because an empty window is a legitimate result
 and must stay distinguishable from a broken parser. The error reports the keys it actually saw.
 
@@ -283,9 +293,19 @@ KLSE Screener is never referenced as a source.
 
 Evidence capture is built — see **Evidence and source traceability** above.
 
-### Fixture provenance — important
+### What is still unverified about Bursa
 
-No real Bursa response has been captured. The fixtures under `tests/fixtures/bursa/` are
-synthetic, so the parser's *structure* is tested but its *field mapping* is an unverified best
-guess. Capturing one response with `--dry-run` is the single live request this design needs; see
-`tests/fixtures/bursa/README.md`.
+The row shape is confirmed. These are not:
+
+- **The `cat=` value for financial results.** Left empty, so the listing returns every
+  announcement type and the results filter runs client-side on the title. Supplying it would cut
+  the volume considerably.
+- **Whether `dt_ht` / `dt_lt` are date-from and date-to.** `--since` filters client-side instead.
+- **The HTML fallback layout** — the rendered page 403s to automated clients, so that fixture
+  mirrors the JSON column order rather than a captured page.
+- **The detail page structure** — `parse_attachment_page()` accepts any `.pdf` link or embed
+  rather than assuming a fixed attachment path.
+
+Cloudflare fronts the site and refuses some automated requests; the endpoint answered 200 to a
+bare request and 403 to a parameterised one during testing. Expect intermittent `BlockedError`,
+which correctly stops the run rather than retrying. See `tests/fixtures/bursa/README.md`.

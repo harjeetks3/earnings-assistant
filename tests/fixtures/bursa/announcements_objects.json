@@ -1,12 +1,14 @@
 {
   "recordsTotal": 4,
+  "recordsFiltered": 4,
+  "category_message": "",
+  "_comment": "SYNTHETIC. The live endpoint returns positional arrays (see announcements_live.json); this covers the alternative records-as-objects shape the parser also accepts, and is the only fixture carrying attachments directly on the listing.",
   "data": [
     {
       "id": "3512001",
       "announcement_date": "16 Aug 2026",
-      "company": "MALAYAN BANKING BERHAD (1155)",
+      "company": "MALAYAN BANKING BERHAD",
       "stock_code": "1155",
-      "category": "Financial Results",
       "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
       "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512001",
       "attachments": [
@@ -19,9 +21,8 @@
     {
       "id": "3512002",
       "announcement_date": "16 Aug 2026",
-      "company": "CIMB GROUP HOLDINGS BERHAD (1023)",
+      "company": "CIMB GROUP HOLDINGS BERHAD",
       "stock_code": "1023",
-      "category": "Financial Results",
       "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
       "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512002",
       "attachments": [
@@ -34,9 +35,8 @@
     {
       "id": "3512003",
       "announcement_date": "15 Aug 2026",
-      "company": "SOME UNTRACKED COMPANY BERHAD (9999)",
+      "company": "SOME UNTRACKED COMPANY BERHAD",
       "stock_code": "9999",
-      "category": "Financial Results",
       "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
       "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512003",
       "attachments": [
@@ -49,9 +49,8 @@
     {
       "id": "3512004",
       "announcement_date": "14 Aug 2026",
-      "company": "MAXIS BERHAD (6012)",
+      "company": "MAXIS BERHAD",
       "stock_code": "6012",
-      "category": "Financial Results",
       "title": "Quarterly rpt on consolidated results for the financial period ended 30 Jun 2026",
       "url": "/market_information/announcements/company_announcement/announcement_details?ann_id=3512004",
       "attachments": [
