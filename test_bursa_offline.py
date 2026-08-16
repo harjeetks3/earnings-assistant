@@ -127,6 +127,16 @@ check("detail url is not the pdf",
 print("\nparser: empty is not the same as broken")
 check("empty payload returns []", parse_json(fixture("announcements_empty.json")) == [])
 
+print("\nparser: the REAL captured response parses (envelope confirmed live)")
+# Captured 2026-08-16 from the live endpoint. It came back empty, so this
+# confirms the envelope -- 'data' really is the announcement array -- but not
+# the row shape. See tests/fixtures/bursa/README.md.
+real = fixture("announcements_empty_live.json")
+check("real response parses without error", parse_json(real) == [], repr(real[:80]))
+check("and is not mistaken for a broken endpoint",
+      json.loads(real).get("data") == [] and "recordsTotal" in json.loads(real),
+      "an empty window must stay distinguishable from a parser failure")
+
 raised = None
 try:
     parse_json(fixture("announcements_malformed.json"))
@@ -268,31 +278,101 @@ check("no socket was opened during the suite", not _sockets_opened, str(_sockets
 # Imported last, deliberately, so the checks above prove the parsing and dedup
 # layers never pull in the networking module. Nothing here makes a request:
 # robots reading is stubbed to fail, which is the path being tested.
-print("\nclient refuses to fetch when robots.txt cannot be read, and only asks once")
-from bursa.client import BursaClient, BursaClientError  # noqa: E402
+from bursa.client import BlockedError, BursaClient, BursaClientError  # noqa: E402
+import io  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
 
-reads = []
-
-
-class _FailingRobots:
-    def set_url(self, url):
-        pass
-
-    def read(self):
-        reads.append(1)
-        raise OSError("network down")
-
-    def can_fetch(self, *a):
-        return True
+REAL_ROBOTS = open(os.path.join(FIXTURES, "robots.txt"), "rb").read()
 
 
-client = BursaClient(cache_dir=None)
-client._robots = None
-import urllib.robotparser as _rp  # noqa: E402
+class _FakeResponse(io.BytesIO):
+    status = 200
 
-_real_rfp = _rp.RobotFileParser
-_rp.RobotFileParser = _FailingRobots
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def _stub_urlopen(result):
+    """Stand in for urllib.request.urlopen, recording the request it was given."""
+    seen = []
+
+    def opener(request, timeout=None):
+        seen.append(request)
+        if isinstance(result, Exception):
+            raise result
+        return _FakeResponse(result)
+
+    return opener, seen
+
+
+print("\nrobots.txt is requested with OUR user-agent, not urllib's default")
+# This is the bug that made a live --dry-run report the whole site as
+# disallowed. RobotFileParser.read() fetches robots.txt with Python's default
+# User-Agent; a site that rejects unidentified clients answers 403, and read()
+# turns that into disallow_all. Bursa's robots.txt actually permits the
+# endpoints we use, so the monitor was banning itself.
+_real_urlopen = urllib.request.urlopen
+opener, seen = _stub_urlopen(REAL_ROBOTS)
+urllib.request.urlopen = opener
 try:
+    client = BursaClient()
+    allowed = client._robots_allows("https://www.bursamalaysia.com/api/v1/announcements/search")
+    check("the real Bursa rules permit the announcements endpoint", allowed,
+          "robots.txt only disallows /locomotive/* and a subscribe path")
+    check("robots.txt was requested once", len(seen) == 1, str(len(seen)))
+    ua = seen[0].get_header("User-agent") or seen[0].get_header("User-Agent")
+    check("and it carried our identifying user-agent",
+          ua and "EarningsBrief" in ua, repr(ua))
+    check("a disallowed path is still refused",
+          not client._robots_allows("https://www.bursamalaysia.com/locomotive/x"))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\na 403 on robots.txt itself is treated as a closed door")
+opener, seen = _stub_urlopen(
+    urllib.error.HTTPError("u", 403, "Forbidden", {}, None))
+urllib.request.urlopen = opener
+try:
+    client = BursaClient()
+    blocked = False
+    try:
+        client._robots_allows("https://www.bursamalaysia.com/anything")
+    except BlockedError:
+        blocked = True
+    check("BlockedError is raised, so the run stops", blocked)
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\nno robots.txt published means no restrictions")
+opener, seen = _stub_urlopen(urllib.error.HTTPError("u", 404, "Not Found", {}, None))
+urllib.request.urlopen = opener
+try:
+    check("a 404 allows fetching",
+          BursaClient()._robots_allows("https://www.bursamalaysia.com/anything"))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\na stated crawl-delay overrides our own pacing when it is slower")
+opener, seen = _stub_urlopen(b"User-agent: *\nCrawl-delay: 9\n")
+urllib.request.urlopen = opener
+try:
+    client = BursaClient()
+    client._robots_allows("https://www.bursamalaysia.com/x")
+    check("we slow down to the site's stated delay", client.min_delay == 9.0,
+          str(client.min_delay))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\nclient refuses to fetch when robots.txt cannot be read, and only asks once")
+
+opener, seen = _stub_urlopen(urllib.error.URLError("network down"))
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(cache_dir=None)
     refusals = 0
     for _ in range(5):
         try:
@@ -301,11 +381,11 @@ try:
             refusals += 1
     check("every attempt is refused", refusals == 5, str(refusals))
     check("robots.txt is read once, not once per attempt",
-          len(reads) == 1, f"{len(reads)} reads — a network blip would hammer robots.txt")
+          len(seen) == 1, f"{len(seen)} reads — a network blip would hammer robots.txt")
     check("no request was counted against the budget", client.requests_made == 0,
           str(client.requests_made))
 finally:
-    _rp.RobotFileParser = _real_rfp
+    urllib.request.urlopen = _real_urlopen
 
 print("\nclient will not be configured to be rude")
 check("delay floor cannot be lowered", BursaClient(min_delay=0).min_delay >= 2.0,
