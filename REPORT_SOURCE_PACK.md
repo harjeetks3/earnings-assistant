@@ -9,7 +9,7 @@
 - Storage is SQLite. `pending_reviews` stages extracted data until human review. `pdf_metadata` is the approved database of record and is only written after the reviewer downloads the draft PDF report and approves it.
 - Duplicate detection hashes the uploaded bytes with SHA-256 and checks `(sha256, file_size)` against both approved and pending rows before saving a new upload.
 - Review reports are generated as PDFs with ReportLab into `reports/`. Draft pending reports use `pending_<id>.pdf`; approved reports use `report_<id>.pdf`.
-- The evaluation harness runs five synthetic PDFs in `test_data/` against the extraction/validation/QoQ-YoY logic and writes JSON outputs in `eval_results/`. Two live runs matter: `evaluation_20260708_090200.json` (3/5, before the unit-scale fix) and `evaluation_20260816_164552.json` (4/5, after it). In the later run **all five cases extracted correct figures**; the one failure was a fixture that required the unit-scale correction warning on a run where the model made no scale error. That expectation has since been made conditional, and replaying both stored runs against the corrected fixture gives 5/5 each. A live run under the corrected fixture has not yet been performed.
+- The evaluation harness runs five synthetic PDFs in `test_data/` against the extraction/validation/QoQ-YoY logic and writes JSON outputs in `eval_results/`. The current live result is `evaluation_20260816_211505.json`: **5/5 passed**, with all six monetary figures in every case traced back to a line in the source document. The progression that got there is worth reporting: 3/5 before the unit-scale audit (`evaluation_20260708_090200.json`), then 4/5 (`evaluation_20260816_164552.json`) where all five cases extracted correct figures but one fixture still demanded a scale-correction warning on a run where the model made no scale error — an expectation that required the model to make a mistake, since made conditional.
 
 # 2. Repository Structure
 
@@ -26,7 +26,8 @@ Meaningful source and artifact files/folders:
   - `evaluation_20260708_084646.json`: stored run, 2/5 passed.
   - `evaluation_20260708_085546.json`: stored run, 3/5 passed.
   - `evaluation_20260708_090200.json`: last run before the unit-scale fix, 3/5 passed.
-  - `evaluation_20260816_164552.json`: latest run, after the fix, 4/5 passed with all figures correct.
+  - `evaluation_20260816_164552.json`: after the unit-scale fix, 4/5 passed with all figures correct.
+  - `evaluation_20260816_211505.json`: latest run, on current code, **5/5 passed**.
 - `reports/`: Generated ReportLab review PDFs. Present files: `report_35.pdf`, `report_36.pdf`, `report_37.pdf`, `report_38.pdf`, `report_39.pdf`. These exist as local/generated artifacts, but the current checked local SQLite database has zero approved rows, so these files are leftover artifacts rather than currently linked DB records.
 - `uploads/`: Local uploaded PDFs, ignored by `.gitignore`. Present local files include `Q1_2025.pdf`, `Q2_2025.pdf`, several `quarterly_report_YYYYMMDD.pdf` files, and `05_adversarial_TransPacific_Global_Q2_FY2026.pdf`.
 - `docs/Earnings Agent Workflow.jpg`: Existing workflow image. It is a useful high-level diagram but is partly stale because it suggests a DB row is created before text extraction and final storage; the current implementation stages data in `pending_reviews` and only promotes it to `pdf_metadata` after human approval.
@@ -339,7 +340,7 @@ That paragraph describes an earlier pass. A live run **was** subsequently comple
 
 **All five cases extracted correct figures in that run.** The single failure was case 04 on the warning set alone: the fixture required the unit-scale correction warning, but the live model got Yamato's arithmetic right, so the audit correctly stayed silent. The fixture was demanding a model mistake. `expected_validation_warnings` has since been split into required and `conditional_validation_warnings`, with the scale-correction warning moved to the conditional list for cases 04 and 05. Replaying both stored runs — the one where the model erred and the one where it did not — gives 5/5 each under the corrected fixture.
 
-Honest phrasing for a report: the latest live run is **4/5 with all figures correct**; **5/5 is a replay figure** under the corrected fixture. A live run under the corrected fixture has not been performed, so do not claim "5/5 live".
+Honest phrasing for a report: the latest live run is `evaluation_20260816_211505.json`, **5/5 passed on current code**, run 2026-08-16 with every figure correct and all six monetary figures traced to the source document in each of the five cases. The earlier 3/5 and 4/5 runs are the pre-fix and intermediate baselines and should be described as such rather than as the current state.
 
 The earlier pre-fix run remains the reference for the failure analysis below:
 
@@ -402,7 +403,7 @@ Suggested capture procedure:
 |---|---|---|---|
 | PDF upload | Valid PDF upload route and UI flow | Implemented, not freshly live-tested in this pass | `POST /upload` accepts PDFs, saves files, extracts metadata/text, runs LLM, stages pending review. |
 | Duplicate detection | Same PDF uploaded twice | Implemented, not covered by stored evaluation JSON | Uses SHA-256 + file size against both approved and pending tables; returns HTTP 409. |
-| JSON extraction | Expected fields returned from synthetic PDFs | 3/5 live before the fix; 4/5 live after it, with **all five cases extracting correct figures**; 5/5 on replay under the corrected fixture | The one post-fix failure was a warning-set expectation that required a scale correction the model did not need, not a wrong figure. |
+| JSON extraction | Expected fields returned from synthetic PDFs | **5/5 live on current code** (3/5 before the unit-scale fix, 4/5 at the intermediate step) | The 4/5 failure was a warning-set expectation that required a scale correction the model did not need, not a wrong figure; the fixture now marks that warning conditional. |
 | Validation warnings | Expected warnings matched | Mixed live; matching on replay | Clean cases matched no warnings. Trans-Pacific produced the PBT > revenue warning but missed the expected low-confidence one, which was untestable (model self-reported 0.98) and has been replaced with a metadata-contradiction check. |
 | QoQ/YoY calculation | Deterministic `pct_change` with `abs(prior)` | Passed for all five stored evaluation cases | Even failed scale cases had matching growth percentages because current/prior values were scaled consistently. |
 | Golden cases | Clean PDFs | 2/2 passed | USD and SEK clean cases passed latest stored run. |
@@ -456,7 +457,7 @@ Page 2:
 Page 3:
 
 - Evaluation methodology: five synthetic selectable-text PDFs, golden/edge/adversarial categories, expected results JSON, numeric tolerances, warning comparison, acceptable alternatives.
-- Evaluation results: 3/5 live before the unit-scale fix, 4/5 live after it (2026-08-16) with all five cases extracting correct figures, and a small table by case. State plainly that 5/5 is a replay figure under the corrected fixture, not a fresh live run.
+- Evaluation results: **5/5 live on current code** (2026-08-16), with 3/5 before the unit-scale fix and 4/5 at the intermediate step shown as the progression. Include a small table by case.
 - Discuss failures: both were one systematic 1000x unit-scale slip (JPY million and `$ '000`), now detected and corrected against figures printed in the document by `_audit_unit_scale()`; the low-confidence expectation was untestable and was replaced by a metadata-contradiction check. Prompt injection was resisted throughout.
 
 Page 4:
@@ -478,5 +479,5 @@ Page 4:
 - Use the actual LLM model configured in code: `gpt-5.4-mini`. Model labelling is now consistent across code, UI and docs.
 - Do not say unit normalisation is left entirely to the model. A deterministic post-check (`_audit_unit_scale()`) verifies the model's arithmetic against the figures printed in the PDF and corrects a systematic scale error when the source confirms it.
 - Be precise about QoQ fallback: production previous-quarter values are DB-only; same-quarter-last-year can fall back to LLM-extracted values. The evaluation harness separately computes QoQ from LLM-extracted previous-quarter fields.
-- Use the latest live result: `eval_results/evaluation_20260816_164552.json`, 4/5 passed, run 2026-08-16 after the unit-scale fix. Note that all five cases extracted correct figures and the one failure was a fixture expectation, not a wrong number. The older `evaluation_20260708_090200.json` (3/5) is the pre-fix baseline. Do not present 5/5 as a live result — it is a replay under the corrected fixture.
+- Use the latest live result: `eval_results/evaluation_20260816_211505.json`, **5/5 passed**, run 2026-08-16 on current code, with 6/6 evidence coverage on every case. `evaluation_20260708_090200.json` (3/5) is the pre-fix baseline and `evaluation_20260816_164552.json` (4/5) the intermediate step.
 - Do not imply the existing `reports/report_35.pdf` to `report_39.pdf` are currently linked to database rows. The current local DB has zero approved and zero pending rows.

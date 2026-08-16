@@ -1,0 +1,876 @@
+{
+  "run_at": "2026-08-16T21:15:05Z",
+  "total": 5,
+  "passed": 5,
+  "failed": 0,
+  "cases": [
+    {
+      "filename": "01_golden_NorthPeak_Analytics_Q1_FY2026.pdf",
+      "category": "golden",
+      "checks": [
+        {
+          "field": "metadata.title",
+          "actual": "NorthPeak Analytics Q1 FY2026 Interim Results",
+          "expected": "NorthPeak Analytics Q1 FY2026 Interim Results",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.author",
+          "actual": "NorthPeak Analytics Investor Relations",
+          "expected": "NorthPeak Analytics Investor Relations",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.creator",
+          "actual": "NorthPeak FinReporting 4.2",
+          "expected": "NorthPeak FinReporting 4.2",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pages",
+          "actual": 2,
+          "expected": 2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "evidence_coverage",
+          "actual": "6/6 figures traced to the document",
+          "expected": "informational",
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "company_name",
+          "actual": "NorthPeak Analytics, Inc.",
+          "expected": "NorthPeak Analytics, Inc.",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "quarter_end_date",
+          "actual": "2026-03-31",
+          "expected": "2026-03-31",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_quarter",
+          "actual": "Q1",
+          "expected": "Q1",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_year",
+          "actual": 2026,
+          "expected": 2026,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "currency",
+          "actual": "USD",
+          "expected": "USD",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "unit_raw",
+          "actual": "US$ '000",
+          "expected": "US$ '000",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_current",
+          "actual": 48.2,
+          "expected": 48.2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_previous_quarter",
+          "actual": 45.1,
+          "expected": 45.1,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_same_quarter_last_year",
+          "actual": 38.5,
+          "expected": 38.5,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_current",
+          "actual": 9.6,
+          "expected": 9.6,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_previous_quarter",
+          "actual": 8.2,
+          "expected": 8.2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_same_quarter_last_year",
+          "actual": 6.1,
+          "expected": 6.1,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "confidence_score",
+          "actual": 0.98,
+          "expected": 0.95,
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "validation_warnings",
+          "actual": [],
+          "expected": {
+            "required": [],
+            "optional": []
+          },
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_qoq",
+          "actual": 6.87,
+          "expected": 6.87,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_yoy",
+          "actual": 25.19,
+          "expected": 25.19,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_qoq",
+          "actual": 17.07,
+          "expected": 17.07,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_yoy",
+          "actual": 57.38,
+          "expected": 57.38,
+          "passed": true,
+          "info_only": false
+        }
+      ],
+      "passed": true
+    },
+    {
+      "filename": "02_golden_Lindqvist_Industrial_Q4_FY2025.pdf",
+      "category": "golden",
+      "checks": [
+        {
+          "field": "metadata.title",
+          "actual": "Lindqvist Industrial AB — Interim Report Q4 2025",
+          "expected": "Lindqvist Industrial AB — Interim Report Q4 2025",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.author",
+          "actual": "Lindqvist Industrial AB (publ)",
+          "expected": "Lindqvist Industrial AB (publ)",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.creator",
+          "actual": "LibreOffice 7.6",
+          "expected": "LibreOffice 7.6",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pages",
+          "actual": 2,
+          "expected": 2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "evidence_coverage",
+          "actual": "6/6 figures traced to the document",
+          "expected": "informational",
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "company_name",
+          "actual": "Lindqvist Industrial AB (publ)",
+          "expected": "Lindqvist Industrial AB",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "quarter_end_date",
+          "actual": "2025-12-31",
+          "expected": "2025-12-31",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_quarter",
+          "actual": "Q4",
+          "expected": "Q4",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_year",
+          "actual": 2025,
+          "expected": 2025,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "currency",
+          "actual": "SEK",
+          "expected": "SEK",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "unit_raw",
+          "actual": "SEK million",
+          "expected": "SEK million (MSEK)",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_current",
+          "actual": 1240.0,
+          "expected": 1240.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_previous_quarter",
+          "actual": 1180.0,
+          "expected": 1180.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_same_quarter_last_year",
+          "actual": 1090.0,
+          "expected": 1090.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_current",
+          "actual": 148.0,
+          "expected": 148.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_previous_quarter",
+          "actual": 132.0,
+          "expected": 132.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_same_quarter_last_year",
+          "actual": 121.0,
+          "expected": 121.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "confidence_score",
+          "actual": 0.99,
+          "expected": 0.9,
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "validation_warnings",
+          "actual": [],
+          "expected": {
+            "required": [],
+            "optional": []
+          },
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_qoq",
+          "actual": 5.08,
+          "expected": 5.08,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_yoy",
+          "actual": 13.76,
+          "expected": 13.76,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_qoq",
+          "actual": 12.12,
+          "expected": 12.12,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_yoy",
+          "actual": 22.31,
+          "expected": 22.31,
+          "passed": true,
+          "info_only": false
+        }
+      ],
+      "passed": true
+    },
+    {
+      "filename": "03_edge_Aurora_BioSciences_Q1_FY2026.pdf",
+      "category": "edge",
+      "checks": [
+        {
+          "field": "metadata.title",
+          "actual": "Aurora BioSciences Q1 FY2026 Results",
+          "expected": "Aurora BioSciences Q1 FY2026 Results",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.author",
+          "actual": "Aurora BioSciences Corporation",
+          "expected": "Aurora BioSciences Corporation",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.creator",
+          "actual": "Aurora IR Suite",
+          "expected": "Aurora IR Suite",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pages",
+          "actual": 2,
+          "expected": 2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "evidence_coverage",
+          "actual": "6/6 figures traced to the document",
+          "expected": "informational",
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "company_name",
+          "actual": "Aurora BioSciences Corporation",
+          "expected": "Aurora BioSciences Corporation",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "quarter_end_date",
+          "actual": "2026-03-31",
+          "expected": "2026-03-31",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_quarter",
+          "actual": "Q1",
+          "expected": "Q1",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_year",
+          "actual": 2026,
+          "expected": 2026,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "currency",
+          "actual": "USD",
+          "expected": "USD",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "unit_raw",
+          "actual": "US$ '000",
+          "expected": "US$ '000",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_current",
+          "actual": 12.4,
+          "expected": 12.4,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_previous_quarter",
+          "actual": 9.8,
+          "expected": 9.8,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_same_quarter_last_year",
+          "actual": 15.2,
+          "expected": 15.2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_current",
+          "actual": -22.6,
+          "expected": -22.6,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_previous_quarter",
+          "actual": -18.4,
+          "expected": -18.4,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_same_quarter_last_year",
+          "actual": -14.1,
+          "expected": -14.1,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "confidence_score",
+          "actual": 0.98,
+          "expected": 0.9,
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "validation_warnings",
+          "actual": [],
+          "expected": {
+            "required": [],
+            "optional": []
+          },
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_qoq",
+          "actual": 26.53,
+          "expected": 26.53,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_yoy",
+          "actual": -18.42,
+          "expected": -18.42,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_qoq",
+          "actual": -22.83,
+          "expected": -22.83,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_yoy",
+          "actual": -60.28,
+          "expected": -60.28,
+          "passed": true,
+          "info_only": false
+        }
+      ],
+      "passed": true
+    },
+    {
+      "filename": "04_edge_Yamato_Robotics_Q4_FY2026.pdf",
+      "category": "edge",
+      "checks": [
+        {
+          "field": "metadata.title",
+          "actual": "Yamato Robotics FY2026 Q4 / Full-Year Tanshin",
+          "expected": "Yamato Robotics FY2026 Q4 / Full-Year Tanshin",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.author",
+          "actual": "Yamato Robotics K.K.",
+          "expected": "Yamato Robotics K.K.",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.creator",
+          "actual": "TDnet XBRL Generator",
+          "expected": "TDnet XBRL Generator",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pages",
+          "actual": 2,
+          "expected": 2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "evidence_coverage",
+          "actual": "6/6 figures traced to the document",
+          "expected": "informational",
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "company_name",
+          "actual": "Yamato Robotics K.K.",
+          "expected": "Yamato Robotics K.K.",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "quarter_end_date",
+          "actual": "2026-03-31",
+          "expected": "2026-03-31",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_quarter",
+          "actual": "Q4",
+          "expected": "Q4",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_year",
+          "actual": 2026,
+          "expected": 2026,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "currency",
+          "actual": "JPY",
+          "expected": "JPY",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "unit_raw",
+          "actual": "¥ million",
+          "expected": "¥ million",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_current",
+          "actual": 49800.0,
+          "expected": 49800.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_previous_quarter",
+          "actual": 46200.0,
+          "expected": 46200.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_same_quarter_last_year",
+          "actual": 44100.0,
+          "expected": 44100.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_current",
+          "actual": 5900.0,
+          "expected": 5900.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_previous_quarter",
+          "actual": 5400.0,
+          "expected": 5400.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_same_quarter_last_year",
+          "actual": 5100.0,
+          "expected": 5100.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "confidence_score",
+          "actual": 0.99,
+          "expected": 0.85,
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "validation_warnings",
+          "actual": [
+            "Unit scale corrected: figures were rescaled by 1000x to match the document (unit as reported: ¥ million). 6 of 6 figures now match the printed source, against 0 before — please verify against the original report"
+          ],
+          "expected": {
+            "required": [],
+            "optional": [
+              "Unit scale corrected: figures were rescaled by 1000x to match the document (unit as reported: ¥ million). 6 of 6 figures now match the printed source, against 0 before — please verify against the original report"
+            ]
+          },
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_qoq",
+          "actual": 7.79,
+          "expected": 7.79,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_yoy",
+          "actual": 12.93,
+          "expected": 12.93,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_qoq",
+          "actual": 9.26,
+          "expected": 9.26,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_yoy",
+          "actual": 15.69,
+          "expected": 15.69,
+          "passed": true,
+          "info_only": false
+        }
+      ],
+      "passed": true
+    },
+    {
+      "filename": "05_adversarial_TransPacific_Global_Q2_FY2026.pdf",
+      "category": "adversarial",
+      "checks": [
+        {
+          "field": "metadata.title",
+          "actual": "Meridian Corp — Q3 FY2025 Annual Report (FINAL)",
+          "expected": "Meridian Corp — Q3 FY2025 Annual Report (FINAL)",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.author",
+          "actual": "Document Services",
+          "expected": "Document Services",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "metadata.creator",
+          "actual": "Microsoft® Word 2019",
+          "expected": "Microsoft® Word 2019",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pages",
+          "actual": 2,
+          "expected": 2,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "evidence_coverage",
+          "actual": "6/6 figures traced to the document",
+          "expected": "informational",
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "company_name",
+          "actual": "Trans-Pacific Global Holdings Ltd",
+          "expected": "Trans-Pacific Global Holdings Ltd",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "quarter_end_date",
+          "actual": "2026-03-31",
+          "expected": "2026-03-31",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_quarter",
+          "actual": "Q2",
+          "expected": "one of ['Q1', 'Q2']",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "fiscal_year",
+          "actual": 2026,
+          "expected": 2026,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "currency",
+          "actual": "SGD",
+          "expected": "one of ['USD', 'SGD']",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "unit_raw",
+          "actual": "$ '000",
+          "expected": "$ '000",
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_current",
+          "actual": 340.0,
+          "expected": 340.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_previous_quarter",
+          "actual": 355.0,
+          "expected": 355.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_same_quarter_last_year",
+          "actual": 362.0,
+          "expected": 362.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_current",
+          "actual": 512.0,
+          "expected": 512.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_previous_quarter",
+          "actual": 41.0,
+          "expected": 41.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_same_quarter_last_year",
+          "actual": 47.0,
+          "expected": 47.0,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "confidence_score",
+          "actual": 0.98,
+          "expected": 0.45,
+          "passed": true,
+          "info_only": true
+        },
+        {
+          "field": "validation_warnings",
+          "actual": [
+            "Unit scale corrected: figures were rescaled by 1000x to match the document (unit as reported: $ '000). 6 of 6 figures now match the printed source, against 0 before — please verify against the original report",
+            "pbt_current (512.00M) exceeds revenue_current (340.00M) — unusual, though legitimate with one-off gains such as asset disposals or revaluations; confirm against the report",
+            "Document metadata names a different entity than the report body (metadata: 'Meridian Corp — Q3 FY2025 Annual Report (FINAL) Document Services', extracted: 'Trans-Pacific Global Holdings Ltd') — verify the file is the report it claims to be"
+          ],
+          "expected": {
+            "required": [
+              "pbt_current (512.00M) exceeds revenue_current (340.00M) — unusual, though legitimate with one-off gains such as asset disposals or revaluations; confirm against the report",
+              "Document metadata names a different entity than the report body (metadata: 'Meridian Corp — Q3 FY2025 Annual Report (FINAL) Document Services', extracted: 'Trans-Pacific Global Holdings Ltd') — verify the file is the report it claims to be"
+            ],
+            "optional": [
+              "Unit scale corrected: figures were rescaled by 1000x to match the document (unit as reported: $ '000). 6 of 6 figures now match the printed source, against 0 before — please verify against the original report"
+            ]
+          },
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_qoq",
+          "actual": -4.23,
+          "expected": -4.23,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "revenue_yoy",
+          "actual": -6.08,
+          "expected": -6.08,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_qoq",
+          "actual": 1148.78,
+          "expected": 1148.78,
+          "passed": true,
+          "info_only": false
+        },
+        {
+          "field": "pbt_yoy",
+          "actual": 989.36,
+          "expected": 989.36,
+          "passed": true,
+          "info_only": false
+        }
+      ],
+      "passed": true
+    }
+  ]
+}

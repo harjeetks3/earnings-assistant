@@ -149,9 +149,12 @@ Be precise about which number you are quoting.
 | Run | Result |
 |---|---|
 | `evaluation_20260708_090200.json` — live, **before** the unit-scale fix | **3/5** |
-| `evaluation_20260816_164552.json` — live, **after** the fix | **4/5** |
-| Replay of both stored runs against the corrected expectations | **5/5 each** |
-| Live run under the corrected expectations | **Not yet performed** |
+| `evaluation_20260816_164552.json` — live, after the fix, old fixture | **4/5** |
+| `evaluation_20260816_211505.json` — **live, current code** | **5/5** |
+| Replay of the two earlier runs against the corrected expectations | 5/5 each |
+
+**The 5/5 is a genuine live run**, made on 2026-08-16 after the evidence prompt
+change, with every figure correct and 6/6 evidence coverage on all five cases.
 
 In the 2026-08-16 live run, **all five cases produced correct figures.** The single failure was
 case 04, and it failed only on the warning set: the fixture required the unit-scale correction
@@ -193,15 +196,14 @@ in the suite rather than in production.
 
 ## Known limitations
 
-- **The evidence prompt change has not been evaluated live.** `EARNINGS_SYSTEM_PROMPT` now asks
-  for source quotes, which changes what the model returns. Simulating three model behaviours —
-  no evidence block, genuine quotes, fabricated quotes — through the real `_evaluate_case()` gives
-  5/5 in all three, because the deterministic fallback locates every figure in these fixtures even
-  when the quotes are worthless. That is the closest available offline proxy, but `llm_verified`
-  coverage remains untested against the real model.
+- **`llm_verified` coverage is still unmeasured.** The live run traced 30/30 figures, but the
+  stored evaluation JSON only records the fields it checks, so the model's `evidence` block is
+  not in the artifact. Replaying it shows all 30 traceable *deterministically* — that is the
+  floor, i.e. what the code finds unaided. How often the model's own quotes verify is not
+  recoverable from the run and is not yet instrumented. Nothing depends on it: an unverifiable
+  quote degrades to a deterministic match, and only then to `unverified`.
 - **The evaluation cannot be run from this environment.** The runtime blocks it because it sends
-  local test PDFs to the external API. Run it yourself with `POST /evaluate` or
-  `run_evaluation()`.
+  local test PDFs to the external API, so it has to be triggered from the UI or a shell.
 - Anchoring assumes `,` thousands separators. Documents using `.` or spaces fall through to the
   "scale unverified" warning rather than being mis-corrected.
 - QoQ/YoY DB lookup matches company names case-insensitively; slightly different extracted names
