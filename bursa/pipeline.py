@@ -140,9 +140,25 @@ def _process_one(db, client, announcement, company, summary, *,
         summary["new_announcements"] += 1
     else:
         summary["skipped_existing"] += 1
-        # Already seen: its attachments were handled on the run that discovered
-        # it. Re-downloading would spend requests to learn nothing.
-        return
+        # Already seen, so normally there is nothing to do — re-downloading
+        # would spend requests to learn nothing.
+        #
+        # But the announcement row is written BEFORE its attachments are
+        # fetched, so a download that failed on the run that discovered it
+        # (a timeout, a 500) would otherwise strand the filing forever: every
+        # later poll would skip it as "already seen" and its PDF would never
+        # arrive. Compare what is stored against what the listing offers, and
+        # only retry when something is genuinely missing.
+        stored = db.execute(
+            "SELECT COUNT(*) FROM attachments WHERE announcement_id = ?",
+            (announcement_id,),
+        ).fetchone()[0]
+        if stored >= len(announcement.attachments):
+            return
+        summary.note(
+            f"retrying {len(announcement.attachments) - stored} missing attachment(s) "
+            f"for previously discovered {announcement.title[:60]!r}"
+        )
 
     for attachment in announcement.attachments:
         summary["attachments_seen"] += 1

@@ -1864,6 +1864,7 @@ def ingest_pdf_bytes(
     *,
     save_folder: str | None = None,
     source_attachment_id: int | None = None,
+    existing_path: str | None = None,
 ) -> dict:
     """Hash, deduplicate, save, extract and stage a PDF for human review.
 
@@ -1906,16 +1907,22 @@ def ingest_pdf_bytes(
             "existing_filename": pending_existing["filename"],
         }
 
-    # Save file
-    folder = save_folder or UPLOAD_FOLDER
-    safe_name = os.path.basename(filename)
-    save_path = os.path.join(folder, safe_name)
-    if os.path.exists(save_path):
-        base, ext = os.path.splitext(safe_name)
-        safe_name = f"{base}_{int(datetime.utcnow().timestamp())}{ext}"
+    # Save file — unless it is already on disk. The monitor has already written
+    # the PDF to attachments/, so writing it again would leave two identical
+    # copies with the second one timestamp-suffixed.
+    if existing_path and os.path.exists(existing_path):
+        save_path = existing_path
+        safe_name = os.path.basename(existing_path)
+    else:
+        folder = save_folder or UPLOAD_FOLDER
+        safe_name = os.path.basename(filename)
         save_path = os.path.join(folder, safe_name)
-    with open(save_path, "wb") as f:
-        f.write(file_bytes)
+        if os.path.exists(save_path):
+            base, ext = os.path.splitext(safe_name)
+            safe_name = f"{base}_{int(datetime.utcnow().timestamp())}{ext}"
+            save_path = os.path.join(folder, safe_name)
+        with open(save_path, "wb") as f:
+            f.write(file_bytes)
 
     # Basic PDF metadata
     meta = get_pdf_metadata(save_path)
@@ -2113,6 +2120,7 @@ def extract_discovered(attachment_id):
     result = ingest_pdf_bytes(
         db, file_bytes, os.path.basename(row["local_path"]),
         save_folder=ATTACHMENTS_FOLDER, source_attachment_id=attachment_id,
+        existing_path=row["local_path"],
     )
     if result["status"] == "duplicate":
         return _duplicate_response(result)

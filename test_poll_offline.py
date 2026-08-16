@@ -36,7 +36,7 @@ os.environ.pop("OPENAI_API_KEY", None)
 
 import app  # noqa: E402
 from bursa import pipeline  # noqa: E402
-from bursa.client import FixtureClient  # noqa: E402
+from bursa.client import BursaClientError, FixtureClient  # noqa: E402
 from bursa.verify import REJECTED, VERIFIED, verify_pdf_bytes  # noqa: E402
 
 failures = []
@@ -125,6 +125,48 @@ with app.app.app_context():
     check("still two attachment rows",
           db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2)
 
+    print("\na download that failed once is retried, not stranded:")
+    # The announcement row is written before its attachments are fetched, so a
+    # transient failure would otherwise leave the filing permanently invisible:
+    # every later poll skips it as "already seen" and its PDF never arrives.
+    class _FlakyClient(FixtureClient):
+        def __init__(self, *a, fail_pdfs=True, **kw):
+            super().__init__(*a, **kw)
+            self.fail_pdfs = fail_pdfs
+
+        def fetch(self, path_or_url, params=None, *, cache_name=None):
+            if self.fail_pdfs and path_or_url.lower().split("?")[0].endswith(".pdf"):
+                raise BursaClientError("simulated timeout")
+            return super().fetch(path_or_url, params, cache_name=cache_name)
+
+    db.execute("DELETE FROM attachments")
+    db.execute("DELETE FROM announcements")
+    db.commit()
+
+    flaky = _FlakyClient(FIXTURES, listing="announcements_objects.json", sample_pdf=SAMPLE)
+    sf = pipeline.run_poll(db, flaky, attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("announcements were recorded", sf["new_announcements"] == 2, str(sf["new_announcements"]))
+    check("but no attachment survived the failure",
+          db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0)
+    check("the failure was reported", sf["errors"] == 2, str(sf["messages"]))
+
+    recovered = pipeline.run_poll(
+        db, FixtureClient(FIXTURES, listing="announcements_objects.json", sample_pdf=SAMPLE),
+        attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("the next poll retries the missing attachments",
+          recovered["downloaded"] == 2, str(recovered["downloaded"]))
+    check("and they are now stored and verified",
+          db.execute("SELECT COUNT(*) FROM attachments WHERE verification_status='verified'"
+                     ).fetchone()[0] == 2)
+    check("no duplicate announcements were created",
+          db.execute("SELECT COUNT(*) FROM announcements").fetchone()[0] == 2)
+
+    settled = pipeline.run_poll(
+        db, FixtureClient(FIXTURES, listing="announcements_objects.json", sample_pdf=SAMPLE),
+        attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("once complete it goes back to downloading nothing",
+          settled["downloaded"] == 0, str(settled["downloaded"]))
+
     print("\nthe HTML fallback produces the same result:")
     s3 = pipeline.run_poll(db, new_client("announcements_listing.html"),
                            attachments_folder=app.ATTACHMENTS_FOLDER, use_html=True)
@@ -166,7 +208,12 @@ check("company is resolved", all(i["stock_code"] in ("1155", "1023") for i in li
       str([i["stock_code"] for i in listed]))
 
 first_id = listed[0]["id"]
+before_files = sorted(os.listdir(app.ATTACHMENTS_FOLDER))
 resp = client.post(f"/discovered/{first_id}/extract")
+after_files = sorted(os.listdir(app.ATTACHMENTS_FOLDER))
+check("extracting reuses the downloaded PDF instead of writing a second copy",
+      before_files == after_files,
+      f"added {set(after_files) - set(before_files)}")
 check("extract returns 201", resp.status_code == 201, str(resp.status_code))
 body = resp.get_json()
 check("it staged a pending review", body.get("status") == "pending_review", str(body)[:160])
