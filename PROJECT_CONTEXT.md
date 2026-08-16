@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Python Flask web application that accepts drag-and-drop PDF uploads of quarterly earnings reports, stores metadata in a local SQLite database, and uses GPT-4o mini to extract structured financial data from each report. Built iteratively across one conversation.
+A Python Flask web application that accepts drag-and-drop PDF uploads of quarterly earnings reports, stores metadata in a local SQLite database, and uses GPT-5.4-mini to extract structured financial data from each report. Built iteratively across one conversation.
 
 **Repo:** https://github.com/josiavickers/earnings-assistant  
 **Local path:** `C:\Users\User\Documents\Repos\earnings-assistant`  
@@ -94,7 +94,7 @@ The DB is auto-migrated on startup: `init_db()` uses `ALTER TABLE` to add any mi
 Uses pypdf to extract all text from a PDF, joining pages with double newlines.
 
 #### `analyse_earnings(pdf_text) -> dict`
-Calls GPT-4o mini with `response_format: json_object` and `temperature=0`. Truncates input to 100,000 characters. Returns a dict of the structured fields, or `{"analysis_error": "..."}` on failure.
+Calls GPT-5.4-mini with `response_format: json_object` and `temperature=0`. Truncates input to 100,000 characters. Returns a dict of the structured fields, or `{"analysis_error": "..."}` on failure.
 
 **System prompt instructs the LLM to return these fields (all monetary values normalised to millions):**
 - company_name, quarter_end_date, fiscal_quarter, fiscal_year, currency, unit_raw
@@ -161,7 +161,7 @@ Single-page app with no external dependencies.
 
 ### Features
 - Drag-and-drop zone (or click to browse), accepts multiple PDFs
-- Upload progress bar → switches to spinning "Analysing with GPT-4o mini…" indicator while server processes
+- Upload progress bar → switches to spinning "Analysing with GPT-5.4-mini…" indicator while server processes
 - Duplicate uploads show an amber warning toast
 - Table with horizontal scroll and sticky Delete column
 

@@ -313,11 +313,166 @@ VALID_QUARTERS = {"Q1", "Q2", "Q3", "Q4"}
 VALID_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+MONETARY_FIELDS = (
+    "revenue_current", "revenue_previous_quarter", "revenue_same_quarter_last_year",
+    "pbt_current", "pbt_previous_quarter", "pbt_same_quarter_last_year",
+)
 
-def validate_analysis(raw: dict) -> list[str]:
+
+# ---------- Unit-scale audit ----------
+#
+# EARNINGS_SYSTEM_PROMPT asks the model to normalise every monetary value to
+# millions, and it reliably reports the document's own unit label in unit_raw —
+# but it gets the arithmetic wrong often enough to matter. A "¥ million" report
+# came back 1000x low (49.8 for a printed 49,800) and a "$ '000" one did the same.
+#
+# The as-printed figures are still in the PDF text, so we can check the model's
+# arithmetic against the document itself. A scale slip is systematic — every field
+# is off by the same factor — so we score each candidate factor by how many of the
+# six figures it can locate in the source, and only act on a clear win.
+
+# Maps a unit label to the multiplier that converts an as-printed figure into millions.
+_UNIT_PATTERNS = (
+    (re.compile(r"'000|’000|\b(?:thousands?|000s|k)\b", re.I), 1e-3),
+    (re.compile(r"\b(?:billions?|bn|b)\b", re.I),              1e3),
+    (re.compile(r"\b(?:millions?|mn|mm|m)\b", re.I),           1.0),
+)
+
+_SCALE_CANDIDATES = (1, 1000, 0.001)
+
+# The audit needs the source text, so anywhere that re-validates an already-stored
+# record (the approval path) cannot regenerate these and must carry them forward.
+_AUDIT_WARNING_PREFIXES = (
+    "Unit scale corrected:",
+    "Unit label ",
+    "None of the extracted figures",
+)
+
+
+def _scale_factor(unit_raw) -> float | None:
+    """Multiplier turning a figure printed under `unit_raw` into millions.
+    None when the label is missing or unrecognised."""
+    if not isinstance(unit_raw, str):
+        return None
+    for pattern, factor in _UNIT_PATTERNS:
+        if pattern.search(unit_raw):
+            return factor
+    return None
+
+
+def _printed_forms(value: float) -> list[str]:
+    """Plausible ways `value` could be typeset in a financial table. Sign is
+    dropped — negatives are commonly printed in parentheses."""
+    v = abs(value)
+    if abs(v - round(v)) < 0.005:
+        n = int(round(v))
+        return [f"{n:,}", str(n)]
+    return [f"{v:,.1f}", f"{v:,.2f}", f"{v:.1f}", f"{v:.2f}"]
+
+
+def _anchored(form: str, text: str) -> bool:
+    """True when `form` appears in `text` as a standalone figure rather than a
+    fragment of a longer one — so "340" does not match inside "340,000"."""
+    return re.search(rf"(?<![\d,.]){re.escape(form)}(?![\d,.])", text) is not None
+
+
+def _count_anchors(values: list[float], factor: float, shift: float, text: str) -> int:
+    """How many of `values`, rescaled by `shift` and converted back to as-printed
+    form, can actually be found in the document text."""
+    return sum(
+        any(_anchored(form, text) for form in _printed_forms(v * shift / factor))
+        for v in values
+    )
+
+
+def _audit_unit_scale(raw: dict, pdf_text: str) -> tuple[dict, list[str]]:
+    """Verify the model's unit normalisation against the figures printed in the
+    source document, correcting a systematic scale error when the document
+    confirms one. Mutates and returns `raw`, plus any warnings.
+
+    Correction is all-or-nothing across the six monetary fields: a partial
+    rescale would be worse than none. It requires the winning factor to beat
+    the model's own arithmetic outright and to anchor at least three figures."""
+    warnings: list[str] = []
+    present = [
+        (field, float(raw[field]))
+        for field in MONETARY_FIELDS
+        if isinstance(raw.get(field), (int, float))
+    ]
+    if not present or not pdf_text:
+        return raw, warnings
+
+    unit_raw = raw.get("unit_raw")
+    factor = _scale_factor(unit_raw)
+    if factor is None:
+        warnings.append(
+            f"Unit label {unit_raw!r} was not recognised — normalisation to "
+            f"millions could not be verified against the document"
+        )
+        return raw, warnings
+
+    values = [v for _, v in present]
+    scores = {
+        shift: _count_anchors(values, factor, shift, pdf_text)
+        for shift in _SCALE_CANDIDATES
+    }
+    # Ties go to the model's own arithmetic; we only override on a clear win.
+    best = max(_SCALE_CANDIDATES, key=lambda s: (scores[s], s == 1))
+
+    if best == 1 or scores[best] <= scores[1] or scores[best] < 3:
+        if max(scores.values()) == 0:
+            warnings.append(
+                f"None of the extracted figures could be matched against the "
+                f"document text (unit as reported: {unit_raw}) — the scale is "
+                f"unverified and should be checked manually"
+            )
+        return raw, warnings
+
+    for field, value in present:
+        raw[field] = value * best
+    warnings.append(
+        f"Unit scale corrected: figures were rescaled by {best:g}x to match the "
+        f"document (unit as reported: {unit_raw}). {scores[best]} of "
+        f"{len(present)} figures now match the printed source, against "
+        f"{scores[1]} before — please verify against the original report"
+    )
+    return raw, warnings
+
+
+# Corporate forms, filing boilerplate and generic report vocabulary — none of it
+# identifies a company, so it is ignored when comparing a PDF's metadata against
+# the company name the model extracted from the document body.
+_NON_IDENTIFYING_TOKENS = {
+    "inc", "ltd", "limited", "llc", "plc", "corp", "corporation", "co", "company",
+    "holding", "holdings", "group", "ab", "publ", "kk", "pte", "bhd", "berhad",
+    "nv", "sa", "gmbh", "kgaa", "asa", "oyj", "spa", "pty",
+    "annual", "interim", "quarterly", "quarter", "report", "reports", "results",
+    "statement", "statements", "financial", "financials", "earnings", "release",
+    "final", "draft", "unaudited", "audited", "condensed", "consolidated",
+    "full", "year", "half", "fy", "cy", "q1", "q2", "q3", "q4", "tanshin",
+    "document", "services", "the", "and", "of", "for",
+}
+
+_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _identifying_tokens(text) -> set[str]:
+    """Words from `text` that could plausibly name a company."""
+    if not isinstance(text, str):
+        return set()
+    return {
+        tok for tok in _TOKEN_SPLIT_RE.split(text.lower())
+        if len(tok) > 1 and not tok.isdigit() and tok not in _NON_IDENTIFYING_TOKENS
+    }
+
+
+def validate_analysis(raw: dict, pdf_meta: dict | None = None) -> list[str]:
     """Run Pydantic type checks and cross-field consistency checks on the
     LLM output dict.  Returns a (possibly empty) list of warning strings.
-    The LLM dict is NOT mutated; warnings are purely informational."""
+    The LLM dict is NOT mutated; warnings are purely informational.
+
+    `pdf_meta`, when supplied, additionally cross-checks the PDF's embedded
+    metadata against the company the model read out of the document body."""
 
     warnings: list[str] = []
 
@@ -400,7 +555,8 @@ def validate_analysis(raw: dict) -> list[str]:
         if rev is not None and pbt is not None and rev > 0 and pbt > rev:
             warnings.append(
                 f"{pbt_field} ({pbt:.2f}M) exceeds {rev_field} ({rev:.2f}M) "
-                f"— profit before tax cannot exceed revenue"
+                f"— unusual, though legitimate with one-off gains such as asset "
+                f"disposals or revaluations; confirm against the report"
             )
 
     # ---- 8. confidence_score bounds ----
@@ -421,15 +577,30 @@ def validate_analysis(raw: dict) -> list[str]:
             warnings.append(f"confidence_score '{score}' cannot be parsed as a number")
 
     # ---- 9. No financial values extracted at all ----
-    financial_fields = [
-        "revenue_current", "revenue_previous_quarter", "revenue_same_quarter_last_year",
-        "pbt_current", "pbt_previous_quarter", "pbt_same_quarter_last_year",
-    ]
-    if all(r.get(f) is None for f in financial_fields):
+    if all(r.get(f) is None for f in MONETARY_FIELDS):
         warnings.append(
             "No financial values were extracted — the PDF may not contain "
             "machine-readable financial tables"
         )
+
+    # ---- 10. PDF metadata contradicts the document body ----
+    # A repurposed template, a mislabelled export or a deliberately misleading
+    # file shows up here: the embedded title/author names one company while the
+    # body reports another. Deterministic, unlike the model's self-reported
+    # confidence, which stays high even on the adversarial fixture.
+    if pdf_meta:
+        company_tokens = _identifying_tokens(r.get("company_name"))
+        meta_text = " ".join(
+            str(pdf_meta.get(key) or "") for key in ("title", "author")
+        )
+        meta_tokens = _identifying_tokens(meta_text)
+        if company_tokens and meta_tokens and not (company_tokens & meta_tokens):
+            warnings.append(
+                f"Document metadata names a different entity than the report body "
+                f"(metadata: '{meta_text.strip()}', extracted: "
+                f"'{r.get('company_name')}') — verify the file is the report it "
+                f"claims to be"
+            )
 
     return warnings
 
@@ -736,16 +907,26 @@ def _package_extracted_data(analysis: dict, analysis_error, warnings: list, grow
     return data
 
 
-def _run_llm_pipeline(pdf_text: str, db, extra_instructions: str | None = None) -> dict:
+def _run_llm_pipeline(
+    pdf_text: str,
+    db,
+    extra_instructions: str | None = None,
+    pdf_meta: dict | None = None,
+) -> dict:
     """Run the LLM extraction + validation + growth calculation and return
     the packaged extracted-data dict. Used for both the initial upload and
     any reviewer-triggered rerun."""
     analysis = analyse_earnings(pdf_text, extra_instructions=extra_instructions)
     analysis_error = analysis.get("analysis_error")
+    # Audit the unit normalisation before anything derives from these figures,
+    # so QoQ/YoY growth is computed from corrected values.
+    scale_warnings: list[str] = []
+    if not analysis_error:
+        analysis, scale_warnings = _audit_unit_scale(analysis, pdf_text)
     growth = compute_qoq_yoy(analysis, db)
     data = _package_extracted_data(analysis, analysis_error, [], growth)
     if not analysis_error:
-        warnings = validate_analysis(data)
+        warnings = scale_warnings + validate_analysis(data, pdf_meta=pdf_meta)
         data["validation_warnings"] = warnings if warnings else None
     return data
 
@@ -861,6 +1042,9 @@ def _evaluate_case(filename: str, expected: dict) -> dict:
         case["error"] = f"LLM analysis failed: {analysis['analysis_error']}"
         return case
 
+    # Same audit the upload path runs, so the suite exercises the real pipeline.
+    analysis, scale_warnings = _audit_unit_scale(analysis, pdf_text)
+
     for field, expected_val in expected.get("expected_extraction", {}).items():
         if field == "confidence_score":
             # LLM self-assessed and varies run to run — report only, don't fail on it.
@@ -870,7 +1054,7 @@ def _evaluate_case(filename: str, expected: dict) -> dict:
         record(field, ok, act, exp)
 
     # ---- Validation warnings ----
-    warnings = validate_analysis(analysis)
+    warnings = scale_warnings + validate_analysis(analysis, pdf_meta=meta)
     expected_warnings = expected.get("expected_validation_warnings", [])
     norm_actual = {_eval_normalize_warning(w) for w in warnings}
     norm_expected = {_eval_normalize_warning(w) for w in expected_warnings}
@@ -1176,7 +1360,7 @@ def upload():
     # GPT-5.4-mini earnings analysis
     print(f"\n[INFO] Starting GPT-5.4-mini analysis for: {safe_name}")
     pdf_text = extract_pdf_text(save_path)
-    extracted_data = _run_llm_pipeline(pdf_text, db)
+    extracted_data = _run_llm_pipeline(pdf_text, db, pdf_meta=meta)
 
     print("\n" + "=" * 50)
     print("GPT-5.4-mini Earnings Analysis — PENDING REVIEW (not yet saved to the database)")
@@ -1309,7 +1493,14 @@ def approve_pending(pending_id):
 
     extracted_data = _apply_comparison_data(json.loads(row["extracted_data"]), db)
     if not extracted_data.get("analysis_error"):
-        warnings = validate_analysis(extracted_data)
+        # The unit-scale audit ran at upload time against the PDF text, which is
+        # no longer to hand — carry its findings forward rather than losing them
+        # from the record the reviewer actually approved.
+        prior = extracted_data.get("validation_warnings") or []
+        carried = [w for w in prior if w.startswith(_AUDIT_WARNING_PREFIXES)]
+        warnings = carried + validate_analysis(
+            extracted_data, pdf_meta={"title": row["title"], "author": row["author"]}
+        )
         extracted_data["validation_warnings"] = warnings if warnings else None
     validation_warnings_json = (
         json.dumps(extracted_data["validation_warnings"])
@@ -1436,7 +1627,11 @@ def reject_pending(pending_id):
     print(f"\n[INFO] Rerunning GPT-5.4-mini analysis for pending #{pending_id} "
           f"(attempt {next_attempt}) with reviewer instructions: {extra_instructions}")
     pdf_text = extract_pdf_text(save_path)
-    extracted_data = _run_llm_pipeline(pdf_text, db, extra_instructions=combined_instructions)
+    extracted_data = _run_llm_pipeline(
+        pdf_text, db,
+        extra_instructions=combined_instructions,
+        pdf_meta=get_pdf_metadata(save_path),
+    )
 
     print("\n" + "=" * 50)
     print(f"GPT-5.4-mini Earnings Analysis — rerun (attempt {next_attempt}, still pending review)")
