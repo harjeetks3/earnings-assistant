@@ -1,3 +1,16 @@
+> **ARCHIVED — historical, not current.** This documents the Phase 1 design *before* the
+> human review gate existed, and it is wrong about the current code in several places: it
+> describes a single `pdf_metadata` table (there are two — `pending_reviews` stages everything
+> until a human approves), lists four API routes (there are twelve), omits the unit-scale audit
+> and the evaluation harness entirely, and its repo/path/author lines describe the upstream fork
+> rather than this working copy.
+>
+> **For current architecture, schema and routes, read [`../PROJECT_STATE.md`](../PROJECT_STATE.md).**
+>
+> Retained because its design rationale — the duplicate-detection scheme, the `abs(prior)` growth
+> formula, the quarter-mapping table, and the `.env` exposure and history-scrub record — is still
+> accurate and worth keeping.
+
 # Earnings Assistant — Project Context
 
 ## Overview

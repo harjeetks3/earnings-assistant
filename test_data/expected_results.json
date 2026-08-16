@@ -123,7 +123,8 @@
       "pbt_same_quarter_last_year": 5100.0,
       "confidence_score": 0.85
     },
-    "expected_validation_warnings": [
+    "expected_validation_warnings": [],
+    "conditional_validation_warnings": [
       "Unit scale corrected: figures were rescaled by 1000x to match the document (unit as reported: ¥ million). 6 of 6 figures now match the printed source, against 0 before — please verify against the original report"
     ],
     "expected_qoq_yoy": {
@@ -159,9 +160,11 @@
       "confidence_score": 0.45
     },
     "expected_validation_warnings": [
-      "Unit scale corrected: figures were rescaled by 1000x to match the document (unit as reported: $ '000). 6 of 6 figures now match the printed source, against 0 before — please verify against the original report",
       "pbt_current (512.00M) exceeds revenue_current (340.00M) — unusual, though legitimate with one-off gains such as asset disposals or revaluations; confirm against the report",
       "Document metadata names a different entity than the report body (metadata: 'Meridian Corp — Q3 FY2025 Annual Report (FINAL) Document Services', extracted: 'Trans-Pacific Global Holdings Ltd') — verify the file is the report it claims to be"
+    ],
+    "conditional_validation_warnings": [
+      "Unit scale corrected: figures were rescaled by 1000x to match the document (unit as reported: $ '000). 6 of 6 figures now match the printed source, against 0 before — please verify against the original report"
     ],
     "expected_qoq_yoy": {
       "revenue_qoq": -4.23,

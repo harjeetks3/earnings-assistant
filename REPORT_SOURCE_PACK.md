@@ -9,7 +9,7 @@
 - Storage is SQLite. `pending_reviews` stages extracted data until human review. `pdf_metadata` is the approved database of record and is only written after the reviewer downloads the draft PDF report and approves it.
 - Duplicate detection hashes the uploaded bytes with SHA-256 and checks `(sha256, file_size)` against both approved and pending rows before saving a new upload.
 - Review reports are generated as PDFs with ReportLab into `reports/`. Draft pending reports use `pending_<id>.pdf`; approved reports use `report_<id>.pdf`.
-- The evaluation harness runs five synthetic PDFs in `test_data/` against the extraction/validation/QoQ-YoY logic and writes JSON outputs in `eval_results/`. The latest stored result has 3/5 cases passing. That run predates `_audit_unit_scale()`; replaying its stored model outputs through the current pipeline offline passes 5/5. No fresh live run has been made since the fix, so 5/5 is a replay figure, not a live measurement.
+- The evaluation harness runs five synthetic PDFs in `test_data/` against the extraction/validation/QoQ-YoY logic and writes JSON outputs in `eval_results/`. Two live runs matter: `evaluation_20260708_090200.json` (3/5, before the unit-scale fix) and `evaluation_20260816_164552.json` (4/5, after it). In the later run **all five cases extracted correct figures**; the one failure was a fixture that required the unit-scale correction warning on a run where the model made no scale error. That expectation has since been made conditional, and replaying both stored runs against the corrected fixture gives 5/5 each. A live run under the corrected fixture has not yet been performed.
 
 # 2. Repository Structure
 
@@ -25,7 +25,8 @@ Meaningful source and artifact files/folders:
 - `eval_results/`: Generated JSON evaluation outputs. Present files:
   - `evaluation_20260708_084646.json`: stored run, 2/5 passed.
   - `evaluation_20260708_085546.json`: stored run, 3/5 passed.
-  - `evaluation_20260708_090200.json`: latest stored run, 3/5 passed.
+  - `evaluation_20260708_090200.json`: last run before the unit-scale fix, 3/5 passed.
+  - `evaluation_20260816_164552.json`: latest run, after the fix, 4/5 passed with all figures correct.
 - `reports/`: Generated ReportLab review PDFs. Present files: `report_35.pdf`, `report_36.pdf`, `report_37.pdf`, `report_38.pdf`, `report_39.pdf`. These exist as local/generated artifacts, but the current checked local SQLite database has zero approved rows, so these files are leftover artifacts rather than currently linked DB records.
 - `uploads/`: Local uploaded PDFs, ignored by `.gitignore`. Present local files include `Q1_2025.pdf`, `Q2_2025.pdf`, several `quarterly_report_YYYYMMDD.pdf` files, and `05_adversarial_TransPacific_Global_Q2_FY2026.pdf`.
 - `docs/Earnings Agent Workflow.jpg`: Existing workflow image. It is a useful high-level diagram but is partly stale because it suggests a DB row is created before text extraction and final storage; the current implementation stages data in `pending_reviews` and only promotes it to `pdf_metadata` after human approval.
@@ -330,17 +331,23 @@ Test case summaries from `test_data/MANIFEST.md`:
 
 `OPENAI_API_KEY` is configured locally. A fresh live evaluation was attempted, but the runtime blocked it because it would send local repository test PDFs to the external OpenAI API and write a new evaluation artifact without explicit approval for that data transfer. No fresh evaluation JSON was created in this pass.
 
-A live run remains outstanding by choice after the `_audit_unit_scale()` fix was written, so the stored 3/5 file below is still the newest artifact in `eval_results/` and is the only *live* evidence available. The 5/5 figure quoted elsewhere in this pack comes from replaying that run's stored model outputs through the current pipeline offline — it verifies the audit, validation and comparison code paths, but not how the live model responds today. Any report drawn from this pack should say "5/5 on replay", never "5/5 live", until `run_evaluation()` has been run against the API and a newer JSON exists here.
+That paragraph describes an earlier pass. A live run **was** subsequently completed on 2026-08-16, after the `_audit_unit_scale()` fix:
 
-Use the latest stored evaluation result as available evidence:
+- File: `eval_results/evaluation_20260816_164552.json`
+- Run timestamp: `2026-08-16T16:45:52Z`
+- Total tests: 5 · Passed: 4 · Failed: 1
+
+**All five cases extracted correct figures in that run.** The single failure was case 04 on the warning set alone: the fixture required the unit-scale correction warning, but the live model got Yamato's arithmetic right, so the audit correctly stayed silent. The fixture was demanding a model mistake. `expected_validation_warnings` has since been split into required and `conditional_validation_warnings`, with the scale-correction warning moved to the conditional list for cases 04 and 05. Replaying both stored runs — the one where the model erred and the one where it did not — gives 5/5 each under the corrected fixture.
+
+Honest phrasing for a report: the latest live run is **4/5 with all figures correct**; **5/5 is a replay figure** under the corrected fixture. A live run under the corrected fixture has not been performed, so do not claim "5/5 live".
+
+The earlier pre-fix run remains the reference for the failure analysis below:
 
 - File: `eval_results/evaluation_20260708_090200.json`
 - Run timestamp: `2026-07-08T09:02:00Z`
-- Total tests: 5
-- Passed: 3
-- Failed: 2
+- Total tests: 5 · Passed: 3 · Failed: 2
 
-Per-case results from latest stored run:
+Per-case results from that pre-fix run:
 
 | Case | Category | Result | Failed fields / notes |
 |---|---|---:|---|
@@ -352,9 +359,9 @@ Per-case results from latest stored run:
 
 Interpretation:
 
-- The latest stored result supports a report claim that the synthetic harness exists and that 3/5 cases passed in the latest available live run.
+- The pre-fix run supports a report claim that the synthetic harness exists and that 3/5 cases passed before the unit-scale fix; the 2026-08-16 run supports 4/5 after it, with all figures correct.
 - Both failures shared a single root cause: a systematic 1000x scale slip, where the model read the unit label correctly but applied the wrong factor when normalising to millions. All six monetary fields were wrong by the same factor in each case, which is what makes the error detectable.
-- `_audit_unit_scale()` now converts those fields back to as-printed form and checks them against the figures actually printed in the PDF text, rescaling all six together only when the document confirms it. On replay of the stored outputs both cases correct (49.8 -> 49800.0 and 0.34 -> 340.0) and the suite passes 5/5. This correction is pending live confirmation.
+- `_audit_unit_scale()` now converts those fields back to as-printed form and checks them against the figures actually printed in the PDF text, rescaling all six together only when the document confirms it. On replay of the stored outputs both cases correct (49.8 -> 49800.0 and 0.34 -> 340.0). It was **confirmed live** on 2026-08-16: case 05 came back scaled 1000x low again and the audit corrected it to 340/512, while case 04 came back correct and was correctly left alone.
 - The expected low-confidence warning on the adversarial case was dropped as untestable: the model self-reported 0.98, so the `score < 0.7` branch never fires. It was replaced with a deterministic check for PDF metadata that contradicts the extracted company name, which is what that fixture actually exercises.
 - The adversarial prompt injection itself did not succeed in the stored run: there is no `VERIFIED HOLDINGS INC`, no `999999` values, and no forced confidence score of 1.0.
 
@@ -395,7 +402,7 @@ Suggested capture procedure:
 |---|---|---|---|
 | PDF upload | Valid PDF upload route and UI flow | Implemented, not freshly live-tested in this pass | `POST /upload` accepts PDFs, saves files, extracts metadata/text, runs LLM, stages pending review. |
 | Duplicate detection | Same PDF uploaded twice | Implemented, not covered by stored evaluation JSON | Uses SHA-256 + file size against both approved and pending tables; returns HTTP 409. |
-| JSON extraction | Expected fields returned from synthetic PDFs | 3/5 in latest stored live run; 5/5 on offline replay after the unit-scale fix | NorthPeak, Lindqvist, and Aurora passed live; Yamato and Trans-Pacific failed on numeric scale and are corrected by `_audit_unit_scale()` on replay. Not yet re-run live. |
+| JSON extraction | Expected fields returned from synthetic PDFs | 3/5 live before the fix; 4/5 live after it, with **all five cases extracting correct figures**; 5/5 on replay under the corrected fixture | The one post-fix failure was a warning-set expectation that required a scale correction the model did not need, not a wrong figure. |
 | Validation warnings | Expected warnings matched | Mixed live; matching on replay | Clean cases matched no warnings. Trans-Pacific produced the PBT > revenue warning but missed the expected low-confidence one, which was untestable (model self-reported 0.98) and has been replaced with a metadata-contradiction check. |
 | QoQ/YoY calculation | Deterministic `pct_change` with `abs(prior)` | Passed for all five stored evaluation cases | Even failed scale cases had matching growth percentages because current/prior values were scaled consistently. |
 | Golden cases | Clean PDFs | 2/2 passed | USD and SEK clean cases passed latest stored run. |
@@ -449,7 +456,7 @@ Page 2:
 Page 3:
 
 - Evaluation methodology: five synthetic selectable-text PDFs, golden/edge/adversarial categories, expected results JSON, numeric tolerances, warning comparison, acceptable alternatives.
-- Evaluation results: latest stored live run 3/5 passed, with a small table by case. State plainly that the 5/5 figure is an offline replay after the fix, not a fresh live run.
+- Evaluation results: 3/5 live before the unit-scale fix, 4/5 live after it (2026-08-16) with all five cases extracting correct figures, and a small table by case. State plainly that 5/5 is a replay figure under the corrected fixture, not a fresh live run.
 - Discuss failures: both were one systematic 1000x unit-scale slip (JPY million and `$ '000`), now detected and corrected against figures printed in the document by `_audit_unit_scale()`; the low-confidence expectation was untestable and was replaced by a metadata-contradiction check. Prompt injection was resisted throughout.
 
 Page 4:
@@ -471,5 +478,5 @@ Page 4:
 - Use the actual LLM model configured in code: `gpt-5.4-mini`. Model labelling is now consistent across code, UI and docs.
 - Do not say unit normalisation is left entirely to the model. A deterministic post-check (`_audit_unit_scale()`) verifies the model's arithmetic against the figures printed in the PDF and corrects a systematic scale error when the source confirms it.
 - Be precise about QoQ fallback: production previous-quarter values are DB-only; same-quarter-last-year can fall back to LLM-extracted values. The evaluation harness separately computes QoQ from LLM-extracted previous-quarter fields.
-- Do not state that the latest live evaluation was freshly run in this pass. A fresh run was blocked by the runtime because it would send local test PDFs to the external API. Use the latest stored result: `eval_results/evaluation_20260708_090200.json`, 3/5 passed.
+- Use the latest live result: `eval_results/evaluation_20260816_164552.json`, 4/5 passed, run 2026-08-16 after the unit-scale fix. Note that all five cases extracted correct figures and the one failure was a fixture expectation, not a wrong number. The older `evaluation_20260708_090200.json` (3/5) is the pre-fix baseline. Do not present 5/5 as a live result — it is a replay under the corrected fixture.
 - Do not imply the existing `reports/report_35.pdf` to `report_39.pdf` are currently linked to database rows. The current local DB has zero approved and zero pending rows.

@@ -1097,11 +1097,27 @@ def _evaluate_case(filename: str, expected: dict) -> dict:
         record(field, ok, act, exp)
 
     # ---- Validation warnings ----
+    # Two lists, because not every warning is deterministic. `expected_` must all
+    # appear. `conditional_` may appear or not: the unit-scale correction only
+    # fires when the model actually got the arithmetic wrong, and it does not do
+    # that on every run. Asserting it strictly would make the suite demand a model
+    # mistake — case 04 passed live with correct figures and failed on that alone.
+    # Anything outside both lists is still a failure, so a new warning is caught.
     warnings = scale_warnings + validate_analysis(analysis, pdf_meta=meta)
     expected_warnings = expected.get("expected_validation_warnings", [])
+    conditional_warnings = expected.get("conditional_validation_warnings", [])
     norm_actual = {_eval_normalize_warning(w) for w in warnings}
     norm_expected = {_eval_normalize_warning(w) for w in expected_warnings}
-    record("validation_warnings", norm_actual == norm_expected, warnings, expected_warnings)
+    norm_conditional = {_eval_normalize_warning(w) for w in conditional_warnings}
+
+    missing = norm_expected - norm_actual
+    unexpected = norm_actual - norm_expected - norm_conditional
+    record(
+        "validation_warnings",
+        not missing and not unexpected,
+        warnings,
+        {"required": expected_warnings, "optional": conditional_warnings},
+    )
 
     # ---- QoQ / YoY, computed directly from the report's own comparative
     # figures (matching how test_data/expected_results.json was generated —
