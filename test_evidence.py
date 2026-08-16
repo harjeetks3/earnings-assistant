@@ -225,7 +225,18 @@ with app.app.app_context():
              FROM metric_observations o JOIN evidence e
                ON e.metric_observation_id = o.id"""
     ).fetchall()
-    check("one observation per populated figure", len(rows) == 6, str(len(rows)))
+    # Four, not six: previous-quarter values are DB-only by design, so packaging
+    # drops them on an empty database. Evidence must describe the figures the
+    # RECORD holds — tracing the model's raw output would cite a source line for
+    # a figure the report itself shows as "—".
+    traced_metrics = sorted(r["metric"] for r in rows)
+    check("an observation for each figure the record actually holds",
+          traced_metrics == ["pbt_current", "pbt_same_quarter_last_year",
+                             "revenue_current", "revenue_same_quarter_last_year"],
+          str(traced_metrics))
+    check("no evidence for figures dropped during packaging",
+          not any(m.endswith("previous_quarter") for m in traced_metrics),
+          "the traceability table would contradict the financial summary")
     check("all linked to the pending review",
           all(r["pending_review_id"] == pending_id for r in rows))
     check("none linked to an approved entry yet",
@@ -234,7 +245,8 @@ with app.app.app_context():
           any(r["metric"] == "revenue_current" and r["match_method"] == app.MATCH_LLM_VERIFIED
               for r in rows), str([tuple(r) for r in rows])[:200])
     check("the unquoted ones fell back to deterministic",
-          sum(1 for r in rows if r["match_method"] == app.MATCH_DETERMINISTIC) == 5,
+          sum(1 for r in rows if r["match_method"] == app.MATCH_DETERMINISTIC)
+          == len(rows) - 1,
           str([r["match_method"] for r in rows]))
 
     client = app.app.test_client()
@@ -244,7 +256,8 @@ with app.app.app_context():
     rows = db.execute(
         "SELECT metric, pdf_metadata_id, pending_review_id FROM metric_observations"
     ).fetchall()
-    check("observations survived the pending row being deleted", len(rows) == 6, str(len(rows)))
+    check("observations survived the pending row being deleted",
+          len(rows) == len(traced_metrics), str(len(rows)))
     check("and now point at the approved entry",
           all(r["pdf_metadata_id"] == approved["id"] for r in rows),
           str([tuple(r) for r in rows])[:200])

@@ -1222,14 +1222,22 @@ def _run_llm_pipeline(
     if not analysis_error:
         analysis, scale_warnings = _audit_unit_scale(analysis, pdf_text)
         scale_warnings = _self_generated_report_warning(pdf_text) + scale_warnings
-        # After the audit, so a corrected figure is traced to the line it was
-        # corrected against rather than to the model's original wrong value.
-        evidence_records = build_evidence(analysis, pdf_text, pages or [])
-        scale_warnings += evidence_summary_warning(evidence_records)
     growth = compute_qoq_yoy(analysis, db)
     data = _package_extracted_data(analysis, analysis_error, [], growth)
     if not analysis_error:
-        warnings = scale_warnings + validate_analysis(data, pdf_meta=pdf_meta)
+        # Trace the figures the RECORD holds, not the model's raw output.
+        # Packaging replaces the previous-quarter fields with DB-derived values
+        # (they are DB-only by design), so tracing the raw analysis would cite a
+        # source line for a figure the report itself shows as absent — the
+        # traceability table would contradict the financial summary above it.
+        #
+        # Built after the unit audit too, so a corrected figure is traced to the
+        # line it was corrected against, not to the model's original wrong value.
+        evidence_records = build_evidence(
+            {**data, "evidence": analysis.get("evidence")}, pdf_text, pages or [])
+        warnings = (scale_warnings
+                    + evidence_summary_warning(evidence_records)
+                    + validate_analysis(data, pdf_meta=pdf_meta))
         data["validation_warnings"] = warnings if warnings else None
     return data, evidence_records
 
