@@ -65,10 +65,16 @@ check("html listing parsed", len(htmls) == 4, f"got {len(htmls)}")
 
 
 def comparable(a):
-    """The fields every shape must agree on. bursa_id and url differ by shape —
-    the object payload carries an explicit id, the positional one does not."""
+    """Every field each shape must agree on, INCLUDING bursa_id.
+
+    The id matters most: the JSON payload carries it explicitly while the
+    positional and HTML shapes only have it inside the detail link. If it were
+    not recovered from the URL, the same announcement would get a different
+    dedup key per shape and falling back to HTML would re-queue everything
+    already discovered.
+    """
     return (a.stock_code, a.company_name, a.title, a.announcement_type,
-            a.announced_at, tuple(att.url for att in a.attachments))
+            a.announced_at, a.bursa_id, tuple(att.url for att in a.attachments))
 
 
 check("objects and arrays agree field-for-field",
@@ -103,6 +109,16 @@ check("html-shape title excludes the pdf filename",
 
 print("\nparser: stock code recovered positionally when there is no explicit field")
 check("array shape still finds the code", arrs[0].stock_code == "1155", repr(arrs[0].stock_code))
+
+print("\nparser: announcement id survives every shape, so dedup keys agree")
+check("json id", objs[0].bursa_id == "3512001", repr(objs[0].bursa_id))
+check("array id recovered from the detail link", arrs[0].bursa_id == "3512001",
+      repr(arrs[0].bursa_id))
+check("html id recovered from the detail link", htmls[0].bursa_id == "3512001",
+      repr(htmls[0].bursa_id))
+check("all three shapes produce the same dedup key",
+      len({dedup.dedup_key(objs[0]), dedup.dedup_key(arrs[0]), dedup.dedup_key(htmls[0])}) == 1,
+      "otherwise the HTML fallback would re-queue everything already discovered")
 
 print("\nparser: detail link and pdf link are not confused")
 check("detail url is not the pdf",
@@ -248,6 +264,36 @@ shutil.rmtree(ws, ignore_errors=True)
 print("\noffline guarantee")
 check("no socket was opened during the suite", not _sockets_opened, str(_sockets_opened))
 check("bursa.client was never imported", "bursa.client" not in sys.modules)
+
+# ============================ prohibitions ==================================
+# These are product constraints, not style preferences, so they are asserted
+# rather than trusted. See CLAUDE.md.
+print("\nprohibited sources and techniques stay absent from the code")
+import re as _re  # noqa: E402
+
+FORBIDDEN = {
+    "KLSE Screener as a source": _re.compile(r"klse[\s_.-]*screener", _re.I),
+    "proxy rotation": _re.compile(r"proxies\s*=|proxy_pool|rotating_proxy", _re.I),
+    "user-agent rotation": _re.compile(r"USER_AGENTS\s*=|random\.choice\([^)]*agent", _re.I),
+    "stealth browser automation": _re.compile(r"undetected[_-]?chrome|cloudscraper|selenium", _re.I),
+    "captcha solving": _re.compile(r"captcha[_-]?solv|2captcha|anticaptcha", _re.I),
+}
+
+sources = []
+for folder in (BASE, os.path.join(BASE, "bursa")):
+    for name in sorted(os.listdir(folder)):
+        if name.endswith(".py"):
+            sources.append(os.path.join(folder, name))
+
+for label, pattern in FORBIDDEN.items():
+    hits = []
+    for path in sources:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for lineno, line in enumerate(f, 1):
+                # The prohibition may be *named* in a comment; only flag code.
+                if pattern.search(line) and not line.lstrip().startswith(("#", '"', "'")):
+                    hits.append(f"{os.path.basename(path)}:{lineno}")
+    check(f"no {label}", not hits, str(hits))
 
 print()
 if failures:

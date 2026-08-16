@@ -66,6 +66,8 @@ best-effort and never blocks or rolls back the action it describes.
 | GET | `/pdfs` | List approved entries |
 | GET | `/pdfs/<id>/report` | Download the final report |
 | DELETE | `/pdfs/<id>` | Delete an approved entry and its file |
+| GET | `/discovered` | Bursa filings the monitor found and verified |
+| POST | `/discovered/<id>/extract` | Human-triggered extraction of a discovered filing (**costs money**) |
 | POST | `/evaluate` | Run the 5-case synthetic suite (**costs money**) |
 | GET | `/eval_results/<file>` | Download a stored evaluation JSON |
 
@@ -137,6 +139,15 @@ Plain asserts, no runner, no API calls — run each directly with `python <file>
   PDF produce structurally identical pending rows, dedup is shared across both entry points, the
   review gate holds (nothing reaches `pdf_metadata`), and review events are recorded. Uses a
   temporary database and a stubbed LLM, so it never touches `pdfs.db`.
+- `test_bursa_offline.py` — parser across all three shapes, date handling, watchlist matching,
+  dedup key stability, idempotent inserts, and the prohibited-technique source scan.
+- `test_poll_offline.py` — the full chain end to end: discovery → filter → dedup → download →
+  hash → verify → queue → human-triggered extract. Also pins that polling twice inserts nothing
+  the second time, and that discovery never creates a pending review or an approved row on its own.
+
+The last two replace `socket.socket` for the duration of the run and then assert nothing
+connected, so a regression that introduces a live request fails in the suite rather than in
+production.
 
 ## Known limitations
 
@@ -172,10 +183,59 @@ extraction, so no API call is spent without a person asking for it.
 - `locate_pending_file()` resolves a pending review's PDF from either `uploads/` or
   `attachments/`, so rerun and discard work for monitored files too.
 - `record_review_event()` writing the review trail across the whole workflow.
+- The `bursa/` package and `poll_bursa.py` (below), plus the Discovered UI panel and
+  `/discovered/<id>/extract`.
 
 There is deliberately **no** separate discovery-queue table: an `attachments` row with
 `verification_status='verified'` and no linked pending review *is* the queue.
 
-**Not yet built:** `bursa/` package (client, parser, watchlist matching, dedup, verification),
-`poll_bursa.py`, the Discovered UI panel and `/discovered/<id>/extract`, and evidence capture
-(`metric_observations` / `evidence` are created but not yet written to).
+### Running the monitor
+
+```bash
+python poll_bursa.py --fixture-dir tests/fixtures/bursa --once   # offline, no network
+python poll_bursa.py --dry-run                                   # live, writes nothing
+python poll_bursa.py --once --since 2026-08-01                   # live pass
+```
+
+There is no loop mode on purpose — use Task Scheduler or cron. Hourly is ample.
+`EARNINGS_DB_PATH` redirects the database, which is how a scheduled run or a test avoids the
+reviewer's working copy.
+
+### Module layout
+
+| Module | Role |
+|---|---|
+| `bursa/models.py` | Normalised `Announcement` / `Attachment`, date parsing |
+| `bursa/parser.py` | bytes → records. **The replaceability seam.** |
+| `bursa/watchlist.py` | Match announcements to tracked companies |
+| `bursa/dedup.py` | Stable keys, idempotent inserts |
+| `bursa/verify.py` | PDF checks before any paid call |
+| `bursa/pipeline.py` | Orchestration; returns a `PollSummary` |
+| `bursa/client.py` | **The only module that touches the network** |
+
+The parser handles two payload shapes plus an HTML listing fallback. All three must normalise to
+identical records — including the announcement id, which the positional and HTML shapes carry only
+inside the detail link. Recovering it is what keeps the dedup key stable across shapes; without
+that, falling back to HTML would re-queue everything already discovered.
+
+`ParserError` is raised rather than returning `[]`, because an empty window is a legitimate result
+and must stay distinguishable from a broken parser. The error reports the keys it actually saw.
+
+### Monitoring conduct
+
+Enforced in `bursa/client.py`, not just documented: an identifying User-Agent with a contact
+address, `robots.txt` consulted and obeyed (unreadable robots.txt means we refuse to fetch), a
+2-second floor between requests that callers cannot lower, a 30-request cap per run, and 403/429
+aborting the run outright. There is no proxy support, no User-Agent list, and no retry-on-block —
+`test_bursa_offline.py` asserts those patterns stay absent from the source, alongside a check that
+KLSE Screener is never referenced as a source.
+
+**Not yet built:** evidence capture — `metric_observations` and `evidence` are created but not yet
+written to.
+
+### Fixture provenance — important
+
+No real Bursa response has been captured. The fixtures under `tests/fixtures/bursa/` are
+synthetic, so the parser's *structure* is tested but its *field mapping* is an unverified best
+guess. Capturing one response with `--dry-run` is the single live request this design needs; see
+`tests/fixtures/bursa/README.md`.

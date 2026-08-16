@@ -982,7 +982,9 @@ UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 REPORTS_FOLDER = os.path.join(BASE_DIR, "reports")
 TEST_DATA_FOLDER = os.path.join(BASE_DIR, "test_data")
 EVAL_RESULTS_FOLDER = os.path.join(BASE_DIR, "eval_results")
-DB_PATH = os.path.join(BASE_DIR, "pdfs.db")
+# Overridable so a scheduled poll or a test run can be pointed at a scratch
+# database instead of the reviewer's working one.
+DB_PATH = os.environ.get("EARNINGS_DB_PATH") or os.path.join(BASE_DIR, "pdfs.db")
 # Phase 2: PDFs fetched by the monitor land here, kept apart from uploads/ so
 # it stays obvious which files a human chose to bring in.
 ATTACHMENTS_FOLDER = os.path.join(BASE_DIR, "attachments")
@@ -1736,6 +1738,86 @@ def upload():
     result = ingest_pdf_bytes(get_db(), file.read(), file.filename)
     if result["status"] == "duplicate":
         return _duplicate_response(result)
+    return jsonify(result), 201
+
+
+# ---------- Discovered (Bursa monitoring) ----------
+#
+# The discovery queue is not a table: it is the attachments the monitor verified
+# but nobody has extracted yet. Extraction is explicitly human-triggered, so no
+# OpenAI call is ever spent by the monitor itself.
+
+@app.route("/discovered", methods=["GET"])
+def list_discovered():
+    """Verified attachments awaiting a decision, newest announcement first."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT a.id, a.filename, a.file_size, a.verification_status,
+                  a.verification_detail, a.downloaded_at, a.local_path,
+                  n.title, n.announced_at, n.url AS announcement_url,
+                  c.stock_code, c.name AS company_name,
+                  (SELECT COUNT(*) FROM pending_reviews p
+                    WHERE p.source_attachment_id = a.id) AS pending_count
+             FROM attachments a
+             JOIN announcements n ON n.id = a.announcement_id
+             LEFT JOIN companies c ON c.id = n.company_id
+            ORDER BY n.announced_at DESC, a.id DESC""",
+    ).fetchall()
+
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["extracted"] = bool(item.pop("pending_count"))
+        item["available"] = (
+            item["verification_status"] == "verified"
+            and not item["extracted"]
+            and bool(item["local_path"]) and os.path.exists(item["local_path"])
+        )
+        item.pop("local_path", None)
+        out.append(item)
+    return jsonify(out)
+
+
+@app.route("/discovered/<int:attachment_id>/extract", methods=["POST"])
+def extract_discovered(attachment_id):
+    """Run extraction on a discovered filing. This is the only place a monitored
+    PDF costs money, and it takes a human pressing the button.
+
+    Hands off to ingest_pdf_bytes(), the same function POST /upload uses, so a
+    monitored filing gets the identical audit, validation and review gate."""
+    db = get_db()
+    row = db.execute("SELECT * FROM attachments WHERE id = ?", (attachment_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    if row["verification_status"] != "verified":
+        return jsonify({
+            "error": "not_verified",
+            "message": (
+                f"This attachment was not verified as a usable filing "
+                f"({row['verification_status']}): {row['verification_detail']}"
+            ),
+        }), 400
+
+    if not row["local_path"] or not os.path.exists(row["local_path"]):
+        return jsonify({
+            "error": "missing_file",
+            "message": "The downloaded PDF is no longer on disk — re-run poll_bursa.py.",
+        }), 410
+
+    with open(row["local_path"], "rb") as f:
+        file_bytes = f.read()
+
+    result = ingest_pdf_bytes(
+        db, file_bytes, os.path.basename(row["local_path"]),
+        save_folder=ATTACHMENTS_FOLDER, source_attachment_id=attachment_id,
+    )
+    if result["status"] == "duplicate":
+        return _duplicate_response(result)
+
+    db.execute("UPDATE announcements SET status = 'extracted' WHERE id = ?",
+               (row["announcement_id"],))
+    db.commit()
     return jsonify(result), 201
 
 

@@ -22,6 +22,7 @@ change.
 from __future__ import annotations
 
 import json
+import re
 from html.parser import HTMLParser
 
 from .models import Announcement, Attachment, normalise_date, strip_tags
@@ -106,6 +107,24 @@ class _LinkCollector(HTMLParser):
             self._href, self._text = None, []
 
 
+_ANN_ID_RE = re.compile(r"[?&]ann(?:ouncement)?_id=(\d+)", re.I)
+
+
+def _bursa_id_from_url(url) -> str | None:
+    """Recover the announcement id from a detail link.
+
+    Without this, the same announcement gets a different dedup key depending on
+    which shape parsed it: the JSON payload carries an explicit id, while the
+    positional and HTML shapes do not, so falling back to the HTML listing would
+    re-queue everything already discovered. The id is present in both — it is
+    just embedded in the link.
+    """
+    if not url:
+        return None
+    match = _ANN_ID_RE.search(str(url))
+    return match.group(1) if match else None
+
+
 def _headline_from_cell(cell) -> str:
     """The headline, not the whole cell.
 
@@ -150,6 +169,9 @@ def _announcement_from_object(record: dict) -> Announcement:
         raise ParserError(
             f"Record has no recognisable title. Keys seen: {sorted(record)}"
         )
+    detail_url = _first(record, FIELD_ALIASES["url"]) or None
+    explicit_id = _first(record, FIELD_ALIASES["bursa_id"])
+    bursa_id = str(explicit_id) if explicit_id else _bursa_id_from_url(detail_url)
     company_cell = _first(record, FIELD_ALIASES["company_name"])
     attachments = ()
     for key in ("attachments", "files", "documents"):
@@ -164,9 +186,8 @@ def _announcement_from_object(record: dict) -> Announcement:
         company_name=strip_tags(company_cell) or None,
         announcement_type=strip_tags(_first(record, FIELD_ALIASES["announcement_type"])) or None,
         announced_at=normalise_date(_first(record, FIELD_ALIASES["announced_at"])),
-        url=(_first(record, FIELD_ALIASES["url"]) or None),
-        bursa_id=(str(_first(record, FIELD_ALIASES["bursa_id"]))
-                  if _first(record, FIELD_ALIASES["bursa_id"]) else None),
+        url=detail_url,
+        bursa_id=bursa_id,
         attachments=attachments,
         raw=record,
     )
@@ -202,14 +223,16 @@ def _announcement_from_array(cells: list) -> Announcement:
     attachments = ()
     for cell in cells:
         attachments = attachments or _extract_links(cell)
+    detail_url = next((href for href, _ in _all_links(cells)
+                       if not href.lower().split("?")[0].endswith(".pdf")), None)
     return Announcement(
         title=title,
         stock_code=_stock_code_from({}, record.get("company_name"), *cells),
         company_name=strip_tags(record.get("company_name")) or None,
         announcement_type=strip_tags(record.get("announcement_type")) or None,
         announced_at=normalise_date(record.get("announced_at")),
-        url=next((href for href, _ in _all_links(cells)
-                  if not href.lower().split("?")[0].endswith(".pdf")), None),
+        url=detail_url,
+        bursa_id=_bursa_id_from_url(detail_url),
         attachments=attachments,
         raw={"cells": [str(c) for c in cells]},
     )
