@@ -30,10 +30,15 @@ try:
                 "pages": len(reader.pages),
             }
 
-    def extract_pdf_text(path):
+    def extract_pdf_pages(path):
+        """Per-page text. extract_pdf_text() is the concatenation of these, so
+        a character offset into that string can be mapped back to a page."""
         with open(path, "rb") as f:
             reader = pypdf.PdfReader(f)
-            return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+            return [page.extract_text() or "" for page in reader.pages]
+
+    def extract_pdf_text(path):
+        return PAGE_SEPARATOR.join(extract_pdf_pages(path))
 
 except ImportError:
     pypdf = None
@@ -41,8 +46,32 @@ except ImportError:
     def get_pdf_metadata(path):
         return {"title": "", "author": "", "creator": "", "pages": None}
 
+    def extract_pdf_pages(path):
+        return []
+
     def extract_pdf_text(path):
         return ""
+
+
+# How pages are joined into the single text block the LLM sees. Named because
+# evidence offsets are computed against exactly this layout.
+PAGE_SEPARATOR = "\n\n"
+
+
+def page_for_offset(offset: int, pages: list) -> int | None:
+    """1-based page number containing a character offset in the joined text.
+
+    Page-level evidence was previously impossible because pages were flattened
+    into one string with no record of the boundaries. This reconstructs them."""
+    if offset is None or not pages:
+        return None
+    cursor = 0
+    for index, page_text in enumerate(pages, start=1):
+        end = cursor + len(page_text)
+        if offset < end:
+            return index
+        cursor = end + len(PAGE_SEPARATOR)
+    return len(pages)
 
 # ---------- PDF review report generation ----------
 
@@ -267,6 +296,39 @@ def generate_report_pdf(data: dict, out_path: str) -> None:
     outlook = data.get("outlook_summary")
     story.append(Paragraph(_esc(outlook), body_style) if outlook else Paragraph("Not available", na_style))
 
+    # ---- Source traceability ----
+    # The whole point of recording evidence is that the reviewer can check a
+    # figure against the document without hunting for it, so it belongs on the
+    # page they actually read — not just in the database.
+    trace = data.get("evidence") or []
+    if trace:
+        story.append(Paragraph("Source Traceability", h2_style))
+        rows = [["Figure", "Page", "As printed in the source"]]
+        for item in trace:
+            label = item.get("metric", "").replace("_", " ")
+            if item.get("verified"):
+                page = f"p.{item['page_number']}" if item.get("page_number") else "—"
+                printed = (item.get("printed_form") or "").strip()
+                shown = printed if len(printed) <= 70 else printed[:67] + "…"
+            else:
+                page, shown = "—", "NOT FOUND IN DOCUMENT — verify manually"
+            rows.append([label, page, shown])
+        table = Table(rows, colWidths=[150, 40, 300], hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#64748b")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.HexColor("#e2e8f0")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            "Figures are located in the extracted text of the source PDF. "
+            "A blank page number means the figure could not be traced and must be "
+            "checked against the original report by hand.", na_style))
+
     # ---- Validation warnings ----
     warnings = data.get("validation_warnings") or []
     if warnings:
@@ -365,6 +427,13 @@ _AUDIT_WARNING_PREFIXES = (
     "Unit label ",
     "None of the extracted figures",
     "This document appears to be a review report",
+)
+
+# Warnings that need the source text to regenerate, so the approve path — which
+# no longer has it — must carry them forward rather than silently dropping them.
+_SOURCE_ONLY_WARNING_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(p) for p in _AUDIT_WARNING_PREFIXES) + r")"
+    r"|^\d+ of \d+ figures could not be traced"
 )
 
 
@@ -483,6 +552,159 @@ def _audit_unit_scale(raw: dict, pdf_text: str) -> tuple[dict, list[str]]:
 # Corporate forms, filing boilerplate and generic report vocabulary — none of it
 # identifies a company, so it is ignored when comparing a PDF's metadata against
 # the company name the model extracted from the document body.
+# ---------- Evidence: model proposes, code confirms ----------
+#
+# "Every financial figure must remain source-traceable" cannot rest on the model
+# saying where a number came from — a citation is exactly the kind of thing an
+# LLM will produce fluently and wrongly. So the model supplies a quote and this
+# code checks it appears verbatim in the extracted text, recording the character
+# offset and page. A quote that cannot be located is stored as UNVERIFIED rather
+# than dropped: a missing trace is information the reviewer needs.
+
+MATCH_LLM_VERIFIED = "llm_verified"    # model quote found verbatim in the source
+MATCH_DETERMINISTIC = "deterministic"  # no usable quote; code located the figure itself
+MATCH_UNVERIFIED = "unverified"        # neither worked — provenance is genuinely missing
+
+_SNIPPET_PAD = 60
+
+
+def _normalise_for_match(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip().lower()
+
+
+def locate_quote(quote: str, pdf_text: str) -> tuple[int, int] | None:
+    """Character span of `quote` within `pdf_text`, or None.
+
+    Tries an exact match first, then a whitespace-insensitive one — PDF text
+    extraction routinely collapses or inserts whitespace, and rejecting an
+    otherwise perfect quote over a double space would report false gaps in
+    provenance. Anything looser would start accepting paraphrase, which is the
+    thing being guarded against.
+    """
+    if not quote or not pdf_text:
+        return None
+    stripped = quote.strip()
+    if len(stripped) < 4:
+        return None
+
+    index = pdf_text.find(stripped)
+    if index != -1:
+        return index, index + len(stripped)
+
+    # Whitespace-insensitive: build a regex from the quote's non-space runs.
+    parts = [re.escape(p) for p in stripped.split()]
+    if not parts:
+        return None
+    match = re.search(r"\s+".join(parts), pdf_text, re.IGNORECASE)
+    return (match.start(), match.end()) if match else None
+
+
+def build_evidence(analysis: dict, pdf_text: str, pages: list) -> list[dict]:
+    """One evidence record per monetary field that has a value.
+
+    Returns dicts ready for the `evidence` table. Fields with a value always
+    produce a record, even when nothing can be traced — that record just carries
+    match_method='unverified'.
+    """
+    claimed = analysis.get("evidence") or {}
+    if not isinstance(claimed, dict):
+        claimed = {}
+
+    records = []
+    for field in MONETARY_FIELDS:
+        value = analysis.get(field)
+        if not isinstance(value, (int, float)):
+            continue
+
+        span = locate_quote(str(claimed.get(field) or ""), pdf_text)
+        method = MATCH_LLM_VERIFIED if span else None
+
+        if span is None:
+            # No usable quote. Fall back to locating the figure's own printed
+            # form — the same anchoring the unit-scale audit uses.
+            factor = _scale_factor(analysis.get("unit_raw")) or 1.0
+            for form in _printed_forms(abs(value) / factor):
+                match = re.search(rf"(?<![\d,.]){re.escape(form)}(?![\d,.])", pdf_text)
+                if match:
+                    span = (match.start(), match.end())
+                    method = MATCH_DETERMINISTIC
+                    break
+
+        if span is None:
+            records.append({
+                "metric": field, "page_number": None, "char_start": None,
+                "char_end": None, "snippet": None, "printed_form": None,
+                "match_method": MATCH_UNVERIFIED, "verified": 0,
+            })
+            continue
+
+        start, end = span
+        records.append({
+            "metric": field,
+            "page_number": page_for_offset(start, pages),
+            "char_start": start,
+            "char_end": end,
+            "snippet": pdf_text[max(0, start - _SNIPPET_PAD):end + _SNIPPET_PAD].strip(),
+            "printed_form": pdf_text[start:end].strip()[:200],
+            "match_method": method,
+            "verified": 1,
+        })
+    return records
+
+
+def record_evidence(db, analysis: dict, evidence_records: list, *,
+                    pending_review_id: int | None = None,
+                    pdf_metadata_id: int | None = None,
+                    source_attachment_id: int | None = None) -> int:
+    """Persist metric observations and their evidence. Best-effort: provenance
+    failing to save must not block the review it describes."""
+    if not evidence_records:
+        return 0
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    written = 0
+    try:
+        for record in evidence_records:
+            cur = db.execute(
+                """INSERT INTO metric_observations (
+                       pdf_metadata_id, pending_review_id, source_attachment_id,
+                       metric, value_millions, currency, unit_raw,
+                       scale_factor_applied, observed_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (pdf_metadata_id, pending_review_id, source_attachment_id,
+                 record["metric"], analysis.get(record["metric"]),
+                 analysis.get("currency"), analysis.get("unit_raw"),
+                 _scale_factor(analysis.get("unit_raw")), now),
+            )
+            db.execute(
+                """INSERT INTO evidence (
+                       metric_observation_id, page_number, char_start, char_end,
+                       snippet, printed_form, match_method, verified, created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (cur.lastrowid, record["page_number"], record["char_start"],
+                 record["char_end"], record["snippet"], record["printed_form"],
+                 record["match_method"], record["verified"], now),
+            )
+            written += 1
+        db.commit()
+    except sqlite3.Error as exc:
+        print(f"[WARNING] Could not record evidence: {exc}")
+    return written
+
+
+def evidence_summary_warning(evidence_records: list) -> list[str]:
+    """Tell the reviewer, on the report they actually read, which figures could
+    not be traced back to the document."""
+    untraced = [r["metric"] for r in evidence_records
+                if r["match_method"] == MATCH_UNVERIFIED]
+    if not untraced:
+        return []
+    return [
+        f"{len(untraced)} of {len(evidence_records)} figures could not be traced to a "
+        f"line in the document ({', '.join(untraced)}) — verify these against the "
+        f"original report before relying on them"
+    ]
+
+
 _NON_IDENTIFYING_TOKENS = {
     "inc", "ltd", "limited", "llc", "plc", "corp", "corporation", "co", "company",
     "holding", "holdings", "group", "ab", "publ", "kk", "pte", "bhd", "berhad",
@@ -673,8 +895,15 @@ Extract structured data from the provided report text and return ONLY a valid JS
   "pbt_same_quarter_last_year":      <profit before tax in the same quarter of the prior fiscal year, normalised to millions, or null>,
   "management_commentary":           "<2-3 sentence summary of key management remarks>",
   "outlook_summary":                 "<2-3 sentence summary of forward guidance or outlook>",
-  "confidence_score":                <float 0.0-1.0: your overall confidence in the accuracy of the extracted fields>
+  "confidence_score":                <float 0.0-1.0: your overall confidence in the accuracy of the extracted fields>,
+  "evidence":                        {"<field name>": "<the exact line of source text the figure came from>", ...}
 }
+
+Evidence rules (important):
+- For each of the six monetary fields you fill in, add an entry to "evidence" whose value is copied VERBATIM from the report text — the exact line or table row containing that figure, character for character.
+- Copy, do not paraphrase, summarise, reformat or re-type from memory. The quote is checked against the source automatically, and a quote that cannot be found is recorded as unverified.
+- Quote the line as printed, with its original digits and separators (e.g. "Revenue 49,800 46,200"), not your normalised value.
+- If you cannot point to a specific line for a field, omit that field from "evidence" rather than inventing a quote.
 
 Rules:
 - ALL monetary values must be normalised to millions of the reported currency, regardless of how they appear in the document (e.g. if the report states values in thousands, multiply by 0.001; if in billions, multiply by 1000).
@@ -953,24 +1182,33 @@ def _run_llm_pipeline(
     db,
     extra_instructions: str | None = None,
     pdf_meta: dict | None = None,
-) -> dict:
-    """Run the LLM extraction + validation + growth calculation and return
-    the packaged extracted-data dict. Used for both the initial upload and
-    any reviewer-triggered rerun."""
+    pages: list | None = None,
+) -> tuple[dict, list]:
+    """Run the LLM extraction + validation + growth calculation.
+
+    Returns (packaged data, evidence records). Evidence is returned rather than
+    written here because the caller owns the row it belongs to — a pending
+    review on ingest, an approved entry later. `pages` enables page numbers in
+    evidence; without it the trace still records character offsets."""
     analysis = analyse_earnings(pdf_text, extra_instructions=extra_instructions)
     analysis_error = analysis.get("analysis_error")
     # Audit the unit normalisation before anything derives from these figures,
     # so QoQ/YoY growth is computed from corrected values.
     scale_warnings: list[str] = []
+    evidence_records: list = []
     if not analysis_error:
         analysis, scale_warnings = _audit_unit_scale(analysis, pdf_text)
         scale_warnings = _self_generated_report_warning(pdf_text) + scale_warnings
+        # After the audit, so a corrected figure is traced to the line it was
+        # corrected against rather than to the model's original wrong value.
+        evidence_records = build_evidence(analysis, pdf_text, pages or [])
+        scale_warnings += evidence_summary_warning(evidence_records)
     growth = compute_qoq_yoy(analysis, db)
     data = _package_extracted_data(analysis, analysis_error, [], growth)
     if not analysis_error:
         warnings = scale_warnings + validate_analysis(data, pdf_meta=pdf_meta)
         data["validation_warnings"] = warnings if warnings else None
-    return data
+    return data, evidence_records
 
 
 # ---------- Flask app ----------
@@ -1084,7 +1322,8 @@ def _evaluate_case(filename: str, expected: dict) -> dict:
     record("pages", meta.get("pages") == expected.get("pages"), meta.get("pages"), expected.get("pages"))
 
     # ---- LLM extraction ----
-    pdf_text = extract_pdf_text(path)
+    pages = extract_pdf_pages(path)
+    pdf_text = PAGE_SEPARATOR.join(pages)
     analysis = analyse_earnings(pdf_text)
     if analysis.get("analysis_error"):
         case["passed"] = False
@@ -1094,6 +1333,16 @@ def _evaluate_case(filename: str, expected: dict) -> dict:
     # Same audit the upload path runs, so the suite exercises the real pipeline.
     analysis, scale_warnings = _audit_unit_scale(analysis, pdf_text)
     scale_warnings = _self_generated_report_warning(pdf_text) + scale_warnings
+
+    # Evidence coverage is reported but never failed on: it measures how well
+    # the model quoted its sources on this run, which varies, and the figures
+    # themselves are already asserted strictly below.
+    evidence_records = build_evidence(analysis, pdf_text, pages)
+    traced = sum(1 for r in evidence_records if r["verified"])
+    record("evidence_coverage", True,
+           f"{traced}/{len(evidence_records)} figures traced to the document",
+           "informational", info_only=True)
+    scale_warnings += evidence_summary_warning(evidence_records)
 
     for field, expected_val in expected.get("expected_extraction", {}).items():
         if field == "confidence_score":
@@ -1176,6 +1425,29 @@ def run_evaluation() -> dict:
     return result
 
 
+def load_evidence(db, *, pdf_metadata_id: int | None = None,
+                  pending_review_id: int | None = None) -> list[dict]:
+    """Evidence rows for a record, ordered as the figures appear in the report."""
+    if pdf_metadata_id is not None:
+        where, param = "o.pdf_metadata_id = ?", pdf_metadata_id
+    elif pending_review_id is not None:
+        where, param = "o.pending_review_id = ?", pending_review_id
+    else:
+        return []
+    try:
+        rows = db.execute(
+            f"""SELECT o.metric, e.page_number, e.printed_form, e.match_method, e.verified
+                  FROM metric_observations o
+                  JOIN evidence e ON e.metric_observation_id = o.id
+                 WHERE {where}""",
+            (param,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    order = {name: index for index, name in enumerate(MONETARY_FIELDS)}
+    return sorted((dict(r) for r in rows), key=lambda r: order.get(r["metric"], 99))
+
+
 def _row_to_report_data(row: sqlite3.Row, db=None) -> dict:
     """Convert a pdf_metadata DB row into the plain dict shape expected by
     generate_report_pdf (validation_warnings deserialised into a list)."""
@@ -1184,6 +1456,7 @@ def _row_to_report_data(row: sqlite3.Row, db=None) -> dict:
     d["validation_warnings"] = json.loads(raw_warnings) if raw_warnings else None
     if db is not None:
         d = _apply_comparison_data(d, db)
+        d["evidence"] = load_evidence(db, pdf_metadata_id=row["id"])
     return d
 
 
@@ -1210,6 +1483,7 @@ def _build_pending_report(db, row: sqlite3.Row) -> str:
     payload["uploaded_at"] = row["uploaded_at"]
     payload["attempt_count"] = row["attempt_count"]
     payload = _apply_comparison_data(payload, db)
+    payload["evidence"] = load_evidence(db, pending_review_id=row["id"])
     report_path = os.path.join(REPORTS_FOLDER, f"pending_{row['id']}.pdf")
     generate_report_pdf(payload, report_path)
     db.execute("UPDATE pending_reviews SET report_path = ? WHERE id = ?", (report_path, row["id"]))
@@ -1626,8 +1900,10 @@ def ingest_pdf_bytes(
 
     # GPT-5.4-mini earnings analysis
     print(f"\n[INFO] Starting GPT-5.4-mini analysis for: {safe_name}")
-    pdf_text = extract_pdf_text(save_path)
-    extracted_data = _run_llm_pipeline(pdf_text, db, pdf_meta=meta)
+    pages = extract_pdf_pages(save_path)
+    pdf_text = PAGE_SEPARATOR.join(pages)
+    extracted_data, evidence_records = _run_llm_pipeline(
+        pdf_text, db, pdf_meta=meta, pages=pages)
 
     print("\n" + "=" * 50)
     print("GPT-5.4-mini Earnings Analysis — PENDING REVIEW (not yet saved to the database)")
@@ -1650,6 +1926,9 @@ def ingest_pdf_bytes(
     )
     db.commit()
     pending_id = cur.lastrowid
+    record_evidence(db, extracted_data, evidence_records,
+                    pending_review_id=pending_id,
+                    source_attachment_id=source_attachment_id)
     record_review_event(
         db, "pending", pending_id, "extracted",
         note=f"Ingested {safe_name}"
@@ -1905,7 +2184,7 @@ def approve_pending(pending_id):
         # no longer to hand — carry its findings forward rather than losing them
         # from the record the reviewer actually approved.
         prior = extracted_data.get("validation_warnings") or []
-        carried = [w for w in prior if w.startswith(_AUDIT_WARNING_PREFIXES)]
+        carried = [w for w in prior if _SOURCE_ONLY_WARNING_RE.match(w)]
         warnings = carried + validate_analysis(
             extracted_data, pdf_meta={"title": row["title"], "author": row["author"]}
         )
@@ -1963,6 +2242,15 @@ def approve_pending(pending_id):
         report_available = True
     except Exception as exc:
         print(f"[WARNING] Could not generate final PDF report for entry #{new_id}: {exc}")
+
+    # Re-point the provenance at the approved entry. The observations are
+    # separate rows, so they survive the pending row being deleted — this is
+    # what keeps an approved figure traceable to the line it came from.
+    db.execute(
+        "UPDATE metric_observations SET pdf_metadata_id = ? WHERE pending_review_id = ?",
+        (new_id, pending_id),
+    )
+    db.commit()
 
     # The pending row is about to be deleted, so record the trail against both
     # subjects: the pending id that is disappearing and the entry it became.
@@ -2041,11 +2329,13 @@ def reject_pending(pending_id):
     next_attempt = row["attempt_count"] + 1
     print(f"\n[INFO] Rerunning GPT-5.4-mini analysis for pending #{pending_id} "
           f"(attempt {next_attempt}) with reviewer instructions: {extra_instructions}")
-    pdf_text = extract_pdf_text(save_path)
-    extracted_data = _run_llm_pipeline(
+    pages = extract_pdf_pages(save_path)
+    pdf_text = PAGE_SEPARATOR.join(pages)
+    extracted_data, evidence_records = _run_llm_pipeline(
         pdf_text, db,
         extra_instructions=combined_instructions,
         pdf_meta=get_pdf_metadata(save_path),
+        pages=pages,
     )
 
     print("\n" + "=" * 50)
@@ -2063,6 +2353,17 @@ def reject_pending(pending_id):
         (json.dumps(extracted_data), next_attempt, json.dumps(extra_instructions), now, pending_id),
     )
     db.commit()
+    # The rerun produced new figures, so the old trace no longer describes them.
+    db.execute(
+        """DELETE FROM evidence WHERE metric_observation_id IN
+               (SELECT id FROM metric_observations WHERE pending_review_id = ?)""",
+        (pending_id,),
+    )
+    db.execute("DELETE FROM metric_observations WHERE pending_review_id = ?", (pending_id,))
+    db.commit()
+    record_evidence(db, extracted_data, evidence_records,
+                    pending_review_id=pending_id,
+                    source_attachment_id=row["source_attachment_id"])
     record_review_event(
         db, "pending", pending_id, "rejected",
         note=(f"Re-run as attempt {next_attempt}"

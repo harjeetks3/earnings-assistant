@@ -105,6 +105,40 @@ Guards, each of which exists because something went wrong:
 > figures to near zero. The magnitude and quorum guards above are the fix. Covered by
 > `test_unit_scale.py`.
 
+## Evidence and source traceability
+
+Every monetary figure that has a value gets a `metric_observations` row and an `evidence` row.
+The model proposes a source quote; **code confirms it**, because a citation is exactly the kind
+of thing an LLM produces fluently and wrongly.
+
+| `match_method` | Meaning |
+|---|---|
+| `llm_verified` | The model's quote was found verbatim in the extracted text |
+| `deterministic` | No usable quote, so code located the figure's own printed form |
+| `unverified` | Neither worked — provenance is genuinely missing, and says so |
+
+`locate_quote()` tries an exact match, then a whitespace-insensitive one, because PDF extraction
+routinely mangles spacing. It goes no looser than that: anything more permissive would start
+accepting paraphrase, which is the thing being guarded against.
+
+An untraceable figure is **recorded as unverified, never dropped** — a missing trace is
+information the reviewer needs. It also raises a validation warning naming the affected fields,
+and that warning is carried through approval by `_SOURCE_ONLY_WARNING_RE` since the approve path
+no longer has the PDF text.
+
+Evidence is built *after* the unit-scale audit, so a corrected figure is traced to the line it
+was corrected against rather than to the model's original wrong value.
+
+Observations are written against `pending_review_id` at ingest and re-pointed to
+`pdf_metadata_id` on approval, so provenance survives the pending row being deleted. A rerun
+discards the old trace first, since it no longer describes the new figures.
+
+The draft report carries a **Source Traceability** table — figure, page number, and the text as
+printed — so the reviewer can check a number without hunting for it. Pages are reconstructed via
+`page_for_offset()` against `extract_pdf_pages()`; previously pages were flattened into one
+string with no record of the boundaries, which is why page-level evidence was listed as a
+limitation.
+
 ## Evaluation status
 
 Be precise about which number you are quoting.
@@ -145,14 +179,21 @@ Plain asserts, no runner, no API calls — run each directly with `python <file>
   hash → verify → queue → human-triggered extract. Also pins that polling twice inserts nothing
   the second time, and that discovery never creates a pending review or an approved row on its own.
 
-The last two replace `socket.socket` for the duration of the run and then assert nothing
-connected, so a regression that introduces a live request fails in the suite rather than in
-production.
+- `test_evidence.py` — a verbatim quote verifies and resolves to a page; a **fabricated** quote
+  does not and is never stored as provenance; with no quote the deterministic fallback finds the
+  printed form; an untraceable figure is recorded as unverified rather than dropped; a malformed
+  evidence block does not crash extraction; and provenance survives approval.
+
+`test_bursa_offline.py` and `test_poll_offline.py` replace `socket.socket` for the duration of
+the run and then assert nothing connected, so a regression that introduces a live request fails
+in the suite rather than in production.
 
 ## Known limitations
 
-- Page-level evidence is not preserved; pages are joined into one text block, so a figure cannot
-  currently be traced to a page. Phase 2 addresses this.
+- **The evidence prompt change has not been evaluated live.** `EARNINGS_SYSTEM_PROMPT` now asks
+  for source quotes, which changes what the model returns. Replays of the stored runs still pass
+  5/5 and all 30 fixture figures trace deterministically, but no live run has happened since the
+  prompt changed. Until it does, `llm_verified` coverage is untested against the real model.
 - Anchoring assumes `,` thousands separators. Documents using `.` or spaces fall through to the
   "scale unverified" warning rather than being mis-corrected.
 - QoQ/YoY DB lookup matches company names case-insensitively; slightly different extracted names
@@ -230,8 +271,7 @@ aborting the run outright. There is no proxy support, no User-Agent list, and no
 `test_bursa_offline.py` asserts those patterns stay absent from the source, alongside a check that
 KLSE Screener is never referenced as a source.
 
-**Not yet built:** evidence capture — `metric_observations` and `evidence` are created but not yet
-written to.
+Evidence capture is built — see **Evidence and source traceability** above.
 
 ### Fixture provenance — important
 
