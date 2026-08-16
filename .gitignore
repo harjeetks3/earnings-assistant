@@ -15,6 +15,9 @@ pdfs.db
 pdfs.db-journal
 uploads/
 
+# Generated knowledge graph (rebuild with /graphify)
+graphify-out/
+
 # OS
 .DS_Store
 Thumbs.db
