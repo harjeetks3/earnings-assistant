@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -378,7 +378,7 @@
       padding: 0.35rem 0.65rem;
     }
     .warnings-block li::before {
-      content: "âš  ";
+      content: "⚠ ";
     }
 
     /* Empty state */
@@ -434,7 +434,7 @@
 <body>
   <div class="container">
     <h1>Earnings Report Assistant</h1>
-    <p class="subtitle">Drop quarterly earnings PDFs, then download and review the generated report â€” figures are only saved once you approve it.</p>
+    <p class="subtitle">Drop quarterly earnings PDFs, then download and review the generated report — figures are only saved once you approve it.</p>
 
     <div id="drop-zone">
       <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -453,7 +453,7 @@
       <div id="discovered-table-wrap">
         <div class="empty-state" id="discovered-empty-state">
           Nothing discovered yet. Run <code>python poll_bursa.py --once</code> to check Bursa
-          for results filings from your watchlist. Discovery only queues them â€”
+          for results filings from your watchlist. Discovery only queues them —
           extraction costs an API call and happens when you click Extract.
         </div>
         <table id="discovered-table" style="display:none;">
@@ -536,7 +536,7 @@
     <div class="card" style="margin-top:1.5rem;">
       <div class="card-header">
         <h2>Evaluation Harness</h2>
-        <button id="run-eval-btn" class="btn-run-eval" onclick="runEvaluation()">â–¶ Run Evaluation Tests</button>
+        <button id="run-eval-btn" class="btn-run-eval" onclick="runEvaluation()">▶ Run Evaluation Tests</button>
       </div>
       <div id="eval-results-wrap">
         <div class="empty-state" id="eval-empty-state">
@@ -582,26 +582,26 @@
       return (bytes / (1024 * 1024)).toFixed(2) + " MB";
     }
     function fmtDate(iso) {
-      if (!iso) return "â€”";
+      if (!iso) return "—";
       return new Date(iso).toLocaleString();
     }
     function trunc(str, n = 28) {
-      if (!str) return "â€”";
-      return str.length > n ? str.slice(0, n) + "â€¦" : str;
+      if (!str) return "—";
+      return str.length > n ? str.slice(0, n) + "…" : str;
     }
     function fmtMoney(val) {
-      if (val == null) return "â€”";
+      if (val == null) return "—";
       return Number(val).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
     }
     function fmtPct(val) {
-      if (val == null) return "â€”";
+      if (val == null) return "—";
       const sign  = val >= 0 ? "+" : "";
       const color = val >= 0 ? "#166534" : "#991b1b";
       const bg    = val >= 0 ? "#dcfce7"  : "#fee2e2";
       return `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:99px;font-size:0.75rem;font-weight:600;background:${bg};color:${color}">${sign}${val.toFixed(1)}%</span>`;
     }
     function confPill(score) {
-      if (score == null) return "â€”";
+      if (score == null) return "—";
       const pct = Math.round(score * 100);
       const cls = score >= 0.8 ? "high" : score >= 0.5 ? "medium" : "low";
       return `<span class="conf ${cls}">${pct}%</span>`;
@@ -614,7 +614,7 @@
       tr.dataset.pendingId = p.id;
 
       const companyCell = p.analysis_error
-        ? `<span class="err-icon" title="Analysis error: ${p.analysis_error}">âš  Error</span>`
+        ? `<span class="err-icon" title="Analysis error: ${p.analysis_error}">⚠ Error</span>`
         : trunc(p.company_name, 20);
 
       const instructions = Array.isArray(p.extra_instructions) ? p.extra_instructions : [];
@@ -626,13 +626,13 @@
         <td>${p.id}</td>
         <td title="${p.filename}">${trunc(p.filename, 22)}</td>
         <td title="${p.company_name || ""}">${companyCell}</td>
-        <td>${p.fiscal_quarter ?? "â€”"}</td>
-        <td>${p.fiscal_year ?? "â€”"}</td>
+        <td>${p.fiscal_quarter ?? "—"}</td>
+        <td>${p.fiscal_year ?? "—"}</td>
         <td>${confPill(p.confidence_score)}</td>
         <td>${attemptsCell}</td>
         <td>
           <div class="pending-actions">
-            <a class="btn-report" href="/pending/${p.id}/report" target="_blank" onclick="markDownloaded(${p.id})" title="Download the draft review PDF">â¬‡ Download</a>
+            <a class="btn-report" href="/pending/${p.id}/report" target="_blank" onclick="markDownloaded(${p.id})" title="Download the draft review PDF">⬇ Download</a>
             <button class="btn-approve" onclick="approvePending(${p.id})" title="Save the extracted figures to the database">Approve</button>
             <input type="text" class="fail-notes" id="notes-${p.id}" placeholder="Notes for the rerun (optional)" />
             <button class="btn-fail" onclick="failPending(${p.id})" title="Rerun the LLM extraction with your notes">Fail &amp; Rerun</button>
@@ -692,10 +692,10 @@
       }
 
       tr.innerHTML = `
-        <td>${escapeHtml(d.stock_code || "â€”")}</td>
-        <td>${escapeHtml(trunc(d.company_name || "â€”", 26))}</td>
-        <td>${escapeHtml(d.announced_at || "â€”")}</td>
-        <td title="${escapeHtml(d.title || "")}">${escapeHtml(trunc(d.title || "â€”", 46))}</td>
+        <td>${escapeHtml(d.stock_code || "—")}</td>
+        <td>${escapeHtml(trunc(d.company_name || "—", 26))}</td>
+        <td>${escapeHtml(d.announced_at || "—")}</td>
+        <td title="${escapeHtml(d.title || "")}">${escapeHtml(trunc(d.title || "—", 46))}</td>
         <td>${status}</td>
         <td>${action}</td>`;
       return tr;
@@ -725,7 +725,7 @@
 
     async function extractDiscovered(id, btn) {
       btn.disabled = true;
-      btn.textContent = "Extractingâ€¦";
+      btn.textContent = "Extracting…";
       try {
         const res = await fetch(`/discovered/${id}/extract`, { method: "POST" });
         const body = await res.json();
@@ -735,7 +735,7 @@
           btn.textContent = "Extract (uses API credit)";
           return;
         }
-        showToast("Extracted â€” review the draft report before approving.", "success");
+        showToast("Extracted — review the draft report before approving.", "success");
         addPendingRow(body);
         loadDiscovered();
       } catch {
@@ -748,7 +748,7 @@
     function markDownloaded(id) {
       // The GET to /pending/<id>/report already records the download server-side;
       // this just gives immediate visual feedback that review can proceed.
-      showToast("Report downloaded â€” review it, then approve or fail.", "success");
+      showToast("Report downloaded — review it, then approve or fail.", "success");
     }
 
     function addPendingRow(p) {
@@ -794,7 +794,7 @@
       const instructions = input ? input.value.trim() : "";
       const row = document.querySelector(`tr[data-pending-id="${id}"]`);
       if (row) row.style.opacity = "0.5";
-      showToast("Re-running analysis with your notesâ€¦", "warning");
+      showToast("Re-running analysis with your notes…", "warning");
       try {
         const res = await fetch(`/pending/${id}/reject`, {
           method: "POST",
@@ -855,32 +855,32 @@
       const warnings = Array.isArray(r.validation_warnings) ? r.validation_warnings : [];
 
       const companyCell = r.analysis_error
-        ? `<span class="err-icon" title="Analysis error: ${r.analysis_error}">âš  Error</span>`
+        ? `<span class="err-icon" title="Analysis error: ${r.analysis_error}">⚠ Error</span>`
         : trunc(r.company_name, 22);
 
       // Append warning count badge next to confidence pill if there are warnings
       const confCell = confPill(r.confidence_score)
-        + (warnings.length ? `<span class="warn-badge" title="${warnings.length} validation warning(s) â€” expand row to view">âš  ${warnings.length}</span>` : "");
+        + (warnings.length ? `<span class="warn-badge" title="${warnings.length} validation warning(s) — expand row to view">⚠ ${warnings.length}</span>` : "");
 
       tr.innerHTML = `
         <td>${r.id}</td>
         <td title="${r.filename}">${trunc(r.filename, 26)}</td>
         <td>${fmtSize(r.file_size)}</td>
-        <td>${r.pages ?? "â€”"}</td>
+        <td>${r.pages ?? "—"}</td>
         <td title="${r.company_name || ""}">${companyCell}</td>
-        <td>${r.fiscal_quarter ?? "â€”"}</td>
-        <td>${r.fiscal_year ?? "â€”"}</td>
+        <td>${r.fiscal_quarter ?? "—"}</td>
+        <td>${r.fiscal_year ?? "—"}</td>
         <td>${fmtMoney(r.revenue_current)}</td>
         <td>${fmtMoney(r.pbt_current)}</td>
-        <td>${r.currency ?? "â€”"}</td>
+        <td>${r.currency ?? "—"}</td>
         <td>${confCell}</td>
         <td>${fmtPct(r.revenue_qoq)}</td>
         <td>${fmtPct(r.revenue_yoy)}</td>
         <td>${fmtPct(r.pbt_qoq)}</td>
         <td>${fmtPct(r.pbt_yoy)}</td>
         <td>${fmtDate(r.uploaded_at)}</td>
-        <td><a class="btn-report" href="/pdfs/${r.id}/report" title="Download PDF review report">â¬‡ PDF</a></td>
-        <td><button class="btn-expand" onclick="toggleDetail(${r.id}, this)" title="View details">â–¼</button></td>
+        <td><a class="btn-report" href="/pdfs/${r.id}/report" title="Download PDF review report">⬇ PDF</a></td>
+        <td><button class="btn-expand" onclick="toggleDetail(${r.id}, this)" title="View details">▼</button></td>
         <td class="col-delete"><button class="btn-delete" onclick="deletePdf(${r.id})">Delete</button></td>
       `;
       return tr;
@@ -935,7 +935,7 @@
       if (!row) return;
       const isOpen = row.style.display !== "none";
       row.style.display = isOpen ? "none" : "";
-      btn.textContent = isOpen ? "â–¼" : "â–²";
+      btn.textContent = isOpen ? "▼" : "▲";
       btn.classList.toggle("open", !isOpen);
     }
 
@@ -956,12 +956,12 @@
         return;
       }
 
-      // Placeholder row â€” upload phase
+      // Placeholder row — upload phase
       const ph = document.createElement("tr");
       ph.className = "progress-row";
       ph.innerHTML = `
         <td colspan="${TOTAL_COLS}">
-          <div class="progress-label">Uploading <strong>${file.name}</strong>â€¦</div>
+          <div class="progress-label">Uploading <strong>${file.name}</strong>…</div>
           <div class="progress-bar-wrap"><div class="progress-bar" style="width:0%"></div></div>
         </td>`;
       emptyState.style.display = "none";
@@ -986,12 +986,12 @@
         });
 
         xhr.upload.addEventListener("load", () => {
-          // Upload done â€” now waiting for GPT-5.4-mini analysis on the server
+          // Upload done — now waiting for GPT-5.4-mini analysis on the server
           barWrap.style.display = "none";
           label.innerHTML = `
             <div class="analysing-label">
               <div class="spinner"></div>
-              Analysing <strong>${file.name}</strong> with GPT-5.4-miniâ€¦
+              Analysing <strong>${file.name}</strong> with GPT-5.4-mini…
             </div>`;
         });
 
@@ -1001,8 +1001,8 @@
             const row = JSON.parse(xhr.responseText);
             addPendingRow(row);
             const label = row.analysis_error
-              ? `${file.name} uploaded (analysis failed) â€” review required.`
-              : `${file.name} analysed â€” download the report to review before it's saved.`;
+              ? `${file.name} uploaded (analysis failed) — review required.`
+              : `${file.name} analysed — download the report to review before it's saved.`;
             showToast(label, row.analysis_error ? "warning" : "success");
           } else {
             const err = JSON.parse(xhr.responseText);
@@ -1081,7 +1081,7 @@
             ${body.passed}/${body.total} passed
           </span>
           <span style="color:#9ca3af;font-size:0.8rem;">Run at ${fmtDate(body.run_at)}</span>
-          ${body.report_filename ? `<a class="btn-report" href="/eval_results/${body.report_filename}" target="_blank">â¬‡ Download full results (JSON)</a>` : ""}
+          ${body.report_filename ? `<a class="btn-report" href="/eval_results/${body.report_filename}" target="_blank">⬇ Download full results (JSON)</a>` : ""}
         </div>
         <table class="eval-summary-table">
           <thead><tr><th>Result</th><th>Test file</th><th>Category</th><th>Details</th></tr></thead>
@@ -1089,7 +1089,7 @@
       `;
 
       body.cases.forEach(c => {
-        const icon = c.passed ? `<span class="eval-pass">âœ“ PASS</span>` : `<span class="eval-fail">âœ— FAIL</span>`;
+        const icon = c.passed ? `<span class="eval-pass">✓ PASS</span>` : `<span class="eval-fail">✗ FAIL</span>`;
         const checks = Array.isArray(c.checks) ? c.checks : [];
         const failedChecks = checks.filter(chk => !chk.passed && !chk.info_only);
 
@@ -1099,7 +1099,7 @@
         } else {
           const rows = checks.map(chk => `
             <tr>
-              <td>${chk.info_only ? "â„¹" : (chk.passed ? '<span class="eval-pass">âœ“</span>' : '<span class="eval-fail">âœ—</span>')}</td>
+              <td>${chk.info_only ? "ℹ" : (chk.passed ? '<span class="eval-pass">✓</span>' : '<span class="eval-fail">✗</span>')}</td>
               <td>${escapeHtml(chk.field)}</td>
               <td>${escapeHtml(JSON.stringify(chk.expected))}</td>
               <td>${escapeHtml(JSON.stringify(chk.actual))}</td>
@@ -1112,14 +1112,14 @@
         }
 
         const summaryText = c.error
-          ? "Error â€” view details"
-          : (c.passed ? "All checks passed" : `${failedChecks.length} check(s) failed â€” view details`);
+          ? "Error — view details"
+          : (c.passed ? "All checks passed" : `${failedChecks.length} check(s) failed — view details`);
 
         html += `
           <tr>
             <td>${icon}</td>
             <td>${escapeHtml(c.filename)}</td>
-            <td>${escapeHtml(c.category || "â€”")}</td>
+            <td>${escapeHtml(c.category || "—")}</td>
             <td><details class="eval-details"><summary>${summaryText}</summary>${detailHtml}</details></td>
           </tr>`;
       });
@@ -1135,10 +1135,10 @@
 
       btn.disabled = true;
       const originalText = btn.innerHTML;
-      btn.innerHTML = `<span class="spinner"></span> Runningâ€¦`;
+      btn.innerHTML = `<span class="spinner"></span> Running…`;
       empty.style.display = "none";
       wrap.style.display = "";
-      wrap.innerHTML = `<p style="color:#6b7280;font-size:0.9rem;">Running the 5 test cases through the extraction pipeline â€” this calls the LLM for each PDF and can take a minuteâ€¦</p>`;
+      wrap.innerHTML = `<p style="color:#6b7280;font-size:0.9rem;">Running the 5 test cases through the extraction pipeline — this calls the LLM for each PDF and can take a minute…</p>`;
 
       try {
         const res = await fetch("/evaluate", { method: "POST" });
