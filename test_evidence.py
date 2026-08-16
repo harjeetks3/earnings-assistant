@@ -126,6 +126,74 @@ check("the warning survives the approve path",
       app._SOURCE_ONLY_WARNING_RE.match(warning[0]) is not None,
       "approve() recomputes warnings without the PDF text, so it must carry this forward")
 
+# --- unusable model responses ----------------------------------------------
+# Asking for evidence quotes makes responses longer, so running into the
+# model's own output limit is more likely. A cut-off response must say so
+# rather than surfacing as an opaque JSON decode error.
+print("\nan unusable model response is diagnosed clearly:")
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content, finish_reason):
+        self.message = _FakeMessage(content)
+        self.finish_reason = finish_reason
+
+
+class _FakeResponse:
+    def __init__(self, content, finish_reason):
+        self.choices = [_FakeChoice(content, finish_reason)]
+
+
+def _fake_openai(content, finish_reason):
+    class _Completions:
+        def create(self, **kw):
+            return _FakeResponse(content, finish_reason)
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    return lambda **kw: _Client()
+
+
+_real_openai, _real_available = app._OpenAI, app._openai_available
+app._openai_available = True
+os.environ["OPENAI_API_KEY"] = "test-key-not-used-for-a-real-call"
+
+app._OpenAI = _fake_openai('{"company_name": "Half a resp', "length")
+result = app.analyse_earnings("some text")
+check("truncated response reports the truncation",
+      "cut off" in (result.get("analysis_error") or ""), repr(result)[:160])
+check("  and does not surface as a JSON decode error",
+      "Expecting" not in (result.get("analysis_error") or ""), repr(result)[:160])
+
+app._OpenAI = _fake_openai(None, "content_filter")
+result = app.analyse_earnings("some text")
+check("empty response reports emptiness",
+      "empty response" in (result.get("analysis_error") or ""), repr(result)[:160])
+check("  and names the finish reason",
+      "content_filter" in (result.get("analysis_error") or ""), repr(result)[:160])
+
+app._OpenAI = _fake_openai("this is not json at all", "stop")
+result = app.analyse_earnings("some text")
+check("malformed JSON reports what came back",
+      "not valid JSON" in (result.get("analysis_error") or "")
+      and "not json at all" in (result.get("analysis_error") or ""), repr(result)[:200])
+
+app._OpenAI = _fake_openai('{"company_name": "Fine Corp"}', "stop")
+result = app.analyse_earnings("some text")
+check("a good response still parses", result.get("company_name") == "Fine Corp", repr(result))
+
+app._OpenAI, app._openai_available = _real_openai, _real_available
+os.environ.pop("OPENAI_API_KEY", None)
+
 # --- persistence -----------------------------------------------------------
 print("\nprovenance is persisted and survives approval:")
 ws = tempfile.mkdtemp(prefix="evidence_test_")

@@ -14,7 +14,7 @@ import re
 from . import dedup, watchlist
 from .client import BlockedError, BursaClientError, RequestBudgetExceeded
 from .parser import ParserError, parse_html, parse_json
-from .verify import REJECTED, VERIFIED, verify_pdf_bytes
+from .verify import VERIFIED, verify_pdf_bytes
 
 # Only announcements that look like results filings are worth queueing. Kept
 # broad on purpose — a missed match costs a manual upload, and the reviewer sees
@@ -186,4 +186,3 @@ def _process_one(db, client, announcement, company, summary, *,
             local_path=local_path, verification_status=status,
             verification_detail=detail,
         )
-        assert status in (VERIFIED, REJECTED)

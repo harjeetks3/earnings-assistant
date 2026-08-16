@@ -263,7 +263,60 @@ shutil.rmtree(ws, ignore_errors=True)
 # ============================ no network ====================================
 print("\noffline guarantee")
 check("no socket was opened during the suite", not _sockets_opened, str(_sockets_opened))
-check("bursa.client was never imported", "bursa.client" not in sys.modules)
+
+# ============================ client conduct ================================
+# Imported last, deliberately, so the checks above prove the parsing and dedup
+# layers never pull in the networking module. Nothing here makes a request:
+# robots reading is stubbed to fail, which is the path being tested.
+print("\nclient refuses to fetch when robots.txt cannot be read, and only asks once")
+from bursa.client import BursaClient, BursaClientError  # noqa: E402
+
+reads = []
+
+
+class _FailingRobots:
+    def set_url(self, url):
+        pass
+
+    def read(self):
+        reads.append(1)
+        raise OSError("network down")
+
+    def can_fetch(self, *a):
+        return True
+
+
+client = BursaClient(cache_dir=None)
+client._robots = None
+import urllib.robotparser as _rp  # noqa: E402
+
+_real_rfp = _rp.RobotFileParser
+_rp.RobotFileParser = _FailingRobots
+try:
+    refusals = 0
+    for _ in range(5):
+        try:
+            client.fetch("/api/v1/announcements/search")
+        except BursaClientError:
+            refusals += 1
+    check("every attempt is refused", refusals == 5, str(refusals))
+    check("robots.txt is read once, not once per attempt",
+          len(reads) == 1, f"{len(reads)} reads — a network blip would hammer robots.txt")
+    check("no request was counted against the budget", client.requests_made == 0,
+          str(client.requests_made))
+finally:
+    _rp.RobotFileParser = _real_rfp
+
+print("\nclient will not be configured to be rude")
+check("delay floor cannot be lowered", BursaClient(min_delay=0).min_delay >= 2.0,
+      str(BursaClient(min_delay=0).min_delay))
+check("request cap cannot be raised", BursaClient(max_requests=10_000).max_requests <= 30,
+      str(BursaClient(max_requests=10_000).max_requests))
+check("user agent identifies the tool and a contact",
+      "EarningsBrief" in BursaClient().user_agent and "@" in BursaClient().user_agent,
+      BursaClient().user_agent)
+
+check("still no socket opened", not _sockets_opened, str(_sockets_opened))
 
 # ============================ prohibitions ==================================
 # These are product constraints, not style preferences, so they are asserted

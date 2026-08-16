@@ -964,8 +964,31 @@ def analyse_earnings(pdf_text: str, extra_instructions: str | None = None) -> di
             ],
         )
 
-        result = json.loads(response.choices[0].message.content)
-        return result
+        choice = response.choices[0]
+        content = choice.message.content
+
+        # Diagnose the two ways this comes back unusable before json.loads turns
+        # them into a confusing decode error. The evidence block made responses
+        # longer, so hitting the model's own output limit is more likely now.
+        if choice.finish_reason == "length":
+            return {"analysis_error": (
+                "The model's response was cut off before the JSON was complete "
+                "(finish_reason=length). The document may be too large, or the "
+                "requested evidence quotes too long."
+            )}
+        if not content or not content.strip():
+            return {"analysis_error": (
+                f"The model returned an empty response (finish_reason="
+                f"{choice.finish_reason})."
+            )}
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            return {"analysis_error": (
+                f"The model's response was not valid JSON ({exc}). "
+                f"First 200 characters: {content[:200]!r}"
+            )}
 
     except Exception as exc:
         error_msg = str(exc)

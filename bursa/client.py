@@ -78,6 +78,7 @@ class BursaClient:
         self.requests_made = 0
         self._last_request_at = 0.0
         self._robots: urllib.robotparser.RobotFileParser | None = None
+        self._robots_error: str | None = None
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
 
@@ -85,6 +86,11 @@ class BursaClient:
     def _robots_allows(self, url: str) -> bool:
         if not self.respect_robots:
             return True
+        # A previous failure is remembered. Without this, every attachment in
+        # the run would re-fetch robots.txt after a network blip — hammering
+        # the very file we are trying to respect.
+        if self._robots_error is not None:
+            raise BursaClientError(self._robots_error)
         if self._robots is None:
             parser = urllib.robotparser.RobotFileParser()
             parser.set_url(urllib.parse.urljoin(self.base_url + "/", "robots.txt"))
@@ -92,10 +98,12 @@ class BursaClient:
                 parser.read()
             except Exception as exc:
                 # Can't read robots.txt: assume we're not welcome rather than
-                # assuming we are.
-                raise BursaClientError(
+                # assuming we are. (A 404 is handled inside read() as "no rules",
+                # which is the correct reading of a site with no robots.txt.)
+                self._robots_error = (
                     f"Could not read robots.txt ({exc}) — refusing to fetch"
-                ) from exc
+                )
+                raise BursaClientError(self._robots_error) from exc
             self._robots = parser
         return self._robots.can_fetch(self.user_agent, url)
 
