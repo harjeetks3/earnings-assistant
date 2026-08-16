@@ -1,0 +1,28 @@
+[
+  {
+    "stock_code": "1155",
+    "name": "Malayan Banking Berhad",
+    "short_name": "MAYBANK",
+    "is_active": true,
+    "notes": "Seed entry. Replace with the companies you actually cover."
+  },
+  {
+    "stock_code": "1023",
+    "name": "CIMB Group Holdings Berhad",
+    "short_name": "CIMB",
+    "is_active": true
+  },
+  {
+    "stock_code": "5347",
+    "name": "Tenaga Nasional Berhad",
+    "short_name": "TENAGA",
+    "is_active": true
+  },
+  {
+    "stock_code": "6012",
+    "name": "Maxis Berhad",
+    "short_name": "MAXIS",
+    "is_active": false,
+    "notes": "Inactive example: kept on file but not polled."
+  }
+]

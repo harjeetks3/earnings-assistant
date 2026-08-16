@@ -983,9 +983,14 @@ REPORTS_FOLDER = os.path.join(BASE_DIR, "reports")
 TEST_DATA_FOLDER = os.path.join(BASE_DIR, "test_data")
 EVAL_RESULTS_FOLDER = os.path.join(BASE_DIR, "eval_results")
 DB_PATH = os.path.join(BASE_DIR, "pdfs.db")
+# Phase 2: PDFs fetched by the monitor land here, kept apart from uploads/ so
+# it stays obvious which files a human chose to bring in.
+ATTACHMENTS_FOLDER = os.path.join(BASE_DIR, "attachments")
+WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(REPORTS_FOLDER, exist_ok=True)
 os.makedirs(EVAL_RESULTS_FOLDER, exist_ok=True)
+os.makedirs(ATTACHMENTS_FOLDER, exist_ok=True)
 
 
 # ---------- Evaluation harness ----------
@@ -1259,6 +1264,184 @@ def close_connection(exception):
         db.close()
 
 
+# ---------- Phase 2: monitoring, provenance and review history ----------
+#
+# All additive. Nothing here changes how a manual upload behaves — the two
+# source_attachment_id columns are nullable precisely so an uploaded PDF, which
+# has no announcement behind it, stays valid.
+
+PHASE2_TABLES = (
+    # Watchlist of record. is_active lets a company stop being polled without
+    # losing the announcements already discovered for it.
+    """
+    CREATE TABLE IF NOT EXISTS companies (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        stock_code  TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL,
+        short_name  TEXT,
+        is_active   INTEGER NOT NULL DEFAULT 1,
+        source      TEXT NOT NULL DEFAULT 'seed',
+        notes       TEXT,
+        added_at    TEXT NOT NULL
+    )
+    """,
+    # dedup_key is what makes polling idempotent: re-running over the same
+    # window inserts nothing the second time. raw_json keeps the original
+    # payload so a parser bug stays diagnosable after the fact.
+    """
+    CREATE TABLE IF NOT EXISTS announcements (
+        id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id             INTEGER REFERENCES companies(id),
+        bursa_announcement_id  TEXT,
+        dedup_key              TEXT NOT NULL UNIQUE,
+        title                  TEXT NOT NULL,
+        announcement_type      TEXT,
+        announced_at           TEXT,
+        url                    TEXT,
+        raw_json               TEXT,
+        status                 TEXT NOT NULL DEFAULT 'discovered',
+        discovered_at          TEXT NOT NULL
+    )
+    """,
+    # sha256 + file_size mirrors the existing manual-upload duplicate rule, so a
+    # monitored PDF already uploaded by hand is recognised rather than re-processed.
+    # A verified row with no pending review IS the discovery queue — no extra table.
+    """
+    CREATE TABLE IF NOT EXISTS attachments (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        announcement_id     INTEGER NOT NULL REFERENCES announcements(id),
+        filename            TEXT,
+        url                 TEXT,
+        sha256              TEXT,
+        file_size           INTEGER,
+        local_path          TEXT,
+        verification_status TEXT NOT NULL DEFAULT 'pending',
+        verification_detail TEXT,
+        downloaded_at       TEXT,
+        UNIQUE (announcement_id, sha256)
+    )
+    """,
+    # The six monetary figures are columns on a single row, which leaves nowhere
+    # to hang provenance. Normalising them here is what makes evidence possible.
+    """
+    CREATE TABLE IF NOT EXISTS metric_observations (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        pdf_metadata_id      INTEGER REFERENCES pdf_metadata(id),
+        pending_review_id    INTEGER,
+        source_attachment_id INTEGER REFERENCES attachments(id),
+        metric               TEXT NOT NULL,
+        value_millions       REAL,
+        currency             TEXT,
+        unit_raw             TEXT,
+        scale_factor_applied REAL,
+        observed_at          TEXT NOT NULL
+    )
+    """,
+    # match_method records HOW a figure was traced: a model-quoted span that code
+    # confirmed verbatim, a deterministic match, or nothing. 'unverified' is a
+    # real, recordable outcome — better than implying provenance that isn't there.
+    """
+    CREATE TABLE IF NOT EXISTS evidence (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        metric_observation_id INTEGER NOT NULL REFERENCES metric_observations(id),
+        page_number           INTEGER,
+        char_start            INTEGER,
+        char_end              INTEGER,
+        snippet               TEXT,
+        printed_form          TEXT,
+        match_method          TEXT NOT NULL DEFAULT 'unverified',
+        verified              INTEGER NOT NULL DEFAULT 0,
+        created_at            TEXT NOT NULL
+    )
+    """,
+    # approve_pending() deletes the pending row, destroying the review trail at
+    # the exact moment it becomes the record of account. This preserves it.
+    """
+    CREATE TABLE IF NOT EXISTS review_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_type TEXT NOT NULL,
+        subject_id   INTEGER NOT NULL,
+        event        TEXT NOT NULL,
+        actor        TEXT,
+        note         TEXT,
+        created_at   TEXT NOT NULL
+    )
+    """,
+)
+
+PHASE2_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_announcements_company ON announcements(company_id)",
+    "CREATE INDEX IF NOT EXISTS idx_attachments_announcement ON attachments(announcement_id)",
+    "CREATE INDEX IF NOT EXISTS idx_attachments_sha256 ON attachments(sha256)",
+    "CREATE INDEX IF NOT EXISTS idx_metric_obs_pdf ON metric_observations(pdf_metadata_id)",
+    "CREATE INDEX IF NOT EXISTS idx_evidence_observation ON evidence(metric_observation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_review_events_subject ON review_events(subject_type, subject_id)",
+)
+
+# Nullable, so every existing row and every manual upload stays valid.
+PENDING_REVIEW_COLUMNS = [("source_attachment_id", "INTEGER")]
+
+
+def _add_missing_columns(db, table: str, columns: list) -> None:
+    """Additive ALTER TABLE migration — the pattern the DB has always used, so
+    an existing pdfs.db upgrades itself on startup with no data loss."""
+    existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    for col_name, col_type in columns:
+        if col_name in existing:
+            continue
+        try:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+            db.commit()
+            print(f"[DB] Added column: {table}.{col_name}")
+        except sqlite3.OperationalError as e:
+            print(f"[DB] Could not add column {table}.{col_name}: {e}")
+
+
+def seed_companies_from_file(db, path: str | None = None) -> int:
+    """Load watchlist.json into `companies`. Insert-only: an existing row is left
+    alone, so edits made through the UI are never clobbered by a restart. Returns
+    the number of companies actually inserted.
+
+    A missing or malformed file is not fatal — monitoring is optional, and the
+    review tool must still start without it."""
+    path = path or WATCHLIST_PATH
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[WARNING] Could not read watchlist {path}: {exc}")
+        return 0
+    if not isinstance(entries, list):
+        print(f"[WARNING] Watchlist {path} should contain a JSON array — ignoring")
+        return 0
+
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    inserted = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        stock_code = str(entry.get("stock_code") or "").strip()
+        name = str(entry.get("name") or "").strip()
+        if not stock_code or not name:
+            print(f"[WARNING] Watchlist entry missing stock_code or name — skipping: {entry!r}")
+            continue
+        cur = db.execute(
+            """INSERT OR IGNORE INTO companies
+                   (stock_code, name, short_name, is_active, source, notes, added_at)
+               VALUES (?,?,?,?,'seed',?,?)""",
+            (
+                stock_code, name, entry.get("short_name"),
+                1 if entry.get("is_active", True) else 0,
+                entry.get("notes"), now,
+            ),
+        )
+        inserted += cur.rowcount or 0
+    db.commit()
+    return inserted
+
+
 def init_db():
     with app.app_context():
         db = sqlite3.connect(DB_PATH)
@@ -1325,16 +1508,25 @@ def init_db():
         """)
         db.commit()
 
+        # Phase 2: monitoring, provenance and review history.
+        for ddl in PHASE2_TABLES:
+            db.execute(ddl)
+        for ddl in PHASE2_INDEXES:
+            db.execute(ddl)
+        db.commit()
+
         # Migrate existing databases that are missing newer columns
-        existing_cols = {row[1] for row in db.execute("PRAGMA table_info(pdf_metadata)")}
-        for col_name, col_type in [("sha256", "TEXT NOT NULL DEFAULT ''")] + ANALYSIS_COLUMNS:
-            if col_name not in existing_cols:
-                try:
-                    db.execute(f"ALTER TABLE pdf_metadata ADD COLUMN {col_name} {col_type}")
-                    db.commit()
-                    print(f"[DB] Added column: {col_name}")
-                except sqlite3.OperationalError as e:
-                    print(f"[DB] Could not add column {col_name}: {e}")
+        _add_missing_columns(
+            db, "pdf_metadata",
+            [("sha256", "TEXT NOT NULL DEFAULT ''")]
+            + ANALYSIS_COLUMNS
+            + [("source_attachment_id", "INTEGER")],
+        )
+        _add_missing_columns(db, "pending_reviews", PENDING_REVIEW_COLUMNS)
+
+        seeded = seed_companies_from_file(db)
+        if seeded:
+            print(f"[DB] Seeded {seeded} company/companies from {os.path.basename(WATCHLIST_PATH)}")
 
         refreshed = _refresh_approved_comparisons(db)
         if refreshed:

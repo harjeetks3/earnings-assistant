@@ -136,10 +136,25 @@ Covers the false-positive rescale, a genuine 1000× slip, and a clean extraction
 - `reports/` holds leftover artifacts (`report_35`–`report_39`) from earlier sessions with no
   matching DB rows. `report_1.pdf` is current and belongs to approved entry #1.
 
-## Phase 2 — planned, not yet built
+## Phase 2 — in progress
 
 Bursa announcement monitoring: discovery → watchlist filter → dedup → attachment hashing → PDF
-verification → the existing pending-review workflow. Monitoring runs as a standalone script and only
-ever *queues* candidates; a human triggers extraction. New tables (`companies`, `announcements`,
-`attachments`, `metric_observations`, `evidence`, `review_events`) are designed but **not yet
-created**. See the approved plan for the sequence.
+verification → the existing pending-review workflow. Monitoring runs as a standalone script; Flask
+makes no outbound Bursa request. Discovery only ever *queues* candidates — a human triggers
+extraction, so no API call is spent without a person asking for it.
+
+**Built:**
+
+- Six tables, created by `init_db()`: `companies`, `announcements`, `attachments`,
+  `metric_observations`, `evidence`, `review_events`, plus supporting indexes.
+- Nullable `source_attachment_id` on both `pdf_metadata` and `pending_reviews`, so a manual upload —
+  which has no announcement behind it — remains valid.
+- `seed_companies_from_file()` loads `watchlist.json` on startup. Insert-only (`INSERT OR IGNORE`),
+  so UI edits survive a restart and re-running is idempotent. A missing or malformed file is
+  logged and skipped, never fatal — the review tool must start without monitoring.
+
+There is deliberately **no** separate discovery-queue table: an `attachments` row with
+`verification_status='verified'` and no linked pending review *is* the queue.
+
+**Not yet built:** `bursa/` package (client, parser, watchlist matching, dedup, verification),
+`poll_bursa.py`, the Discovered UI panel, `ingest_pdf_bytes()` refactor, and evidence capture.
