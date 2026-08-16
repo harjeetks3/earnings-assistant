@@ -9,8 +9,13 @@ don't patch around it. Rules that don't change live in `CLAUDE.md`.
 
 ## Pipeline
 
+`ingest_pdf_bytes()` is the **only** way a PDF enters the system. Both `POST /upload` and the
+monitored-attachment path call it, so a discovered PDF cannot reach a second, weaker route that
+skips the unit-scale audit or the review gate. `upload()` is a thin HTTP wrapper over it.
+
 ```
-PDF in ──> extract_pdf_text()        pypdf, pages joined with blank lines
+PDF in ──> ingest_pdf_bytes()        hash, dedupe, save  (shared entry point)
+       ──> extract_pdf_text()        pypdf, pages joined with blank lines
        ──> analyse_earnings()        gpt-5.4-mini, temperature 0, JSON mode, 100k char cap
        ──> _audit_unit_scale()       verifies the model's arithmetic against the printed figures
        ──> compute_qoq_yoy()         DB history first, report's own comparatives as fallback
@@ -41,8 +46,11 @@ Same file facts plus `extracted_data` (whole analysis as JSON), `report_path`, `
 
 `downloaded_at` gates approval: you cannot approve a report you have not downloaded.
 
-> **Known gap:** `approve_pending()` deletes the pending row (`app.py:1605`), so review history is
-> lost at the moment of approval. Phase 2 adds `review_events` to fix this.
+`approve_pending()` still deletes the pending row, but the history no longer dies with it:
+`record_review_event()` appends to `review_events` on ingest, download, reject, discard and
+approval. An approval writes two rows — one against the disappearing pending id and one against
+the entry it became — so the trail stays followable across the handover. Event logging is
+best-effort and never blocks or rolls back the action it describes.
 
 ## Routes
 
@@ -122,8 +130,13 @@ audit, validation and comparison code paths, but not how the live model responds
 
 ## Tests
 
-`test_unit_scale.py` — plain asserts, no runner, no API calls: `python test_unit_scale.py`.
-Covers the false-positive rescale, a genuine 1000× slip, and a clean extraction.
+Plain asserts, no runner, no API calls — run each directly with `python <file>`.
+
+- `test_unit_scale.py` — the false-positive rescale, a genuine 1000× slip, a clean extraction.
+- `test_ingest_handoff.py` — guards the shared-ingest refactor: a monitored PDF and an uploaded
+  PDF produce structurally identical pending rows, dedup is shared across both entry points, the
+  review gate holds (nothing reaches `pdf_metadata`), and review events are recorded. Uses a
+  temporary database and a stubbed LLM, so it never touches `pdfs.db`.
 
 ## Known limitations
 
@@ -153,8 +166,16 @@ extraction, so no API call is spent without a person asking for it.
   so UI edits survive a restart and re-running is idempotent. A missing or malformed file is
   logged and skipped, never fatal — the review tool must start without monitoring.
 
+- `ingest_pdf_bytes()` — the single shared ingestion path (see Pipeline above), with
+  `save_folder` and `source_attachment_id` parameters so monitored PDFs land in `attachments/`
+  and carry their provenance.
+- `locate_pending_file()` resolves a pending review's PDF from either `uploads/` or
+  `attachments/`, so rerun and discard work for monitored files too.
+- `record_review_event()` writing the review trail across the whole workflow.
+
 There is deliberately **no** separate discovery-queue table: an `attachments` row with
 `verification_status='verified'` and no linked pending review *is* the queue.
 
 **Not yet built:** `bursa/` package (client, parser, watchlist matching, dedup, verification),
-`poll_bursa.py`, the Discovered UI panel, `ingest_pdf_bytes()` refactor, and evidence capture.
+`poll_bursa.py`, the Discovered UI panel and `/discovered/<id>/extract`, and evidence capture
+(`metric_observations` / `evidence` are created but not yet written to).

@@ -1397,6 +1397,22 @@ def _add_missing_columns(db, table: str, columns: list) -> None:
             print(f"[DB] Could not add column {table}.{col_name}: {e}")
 
 
+def record_review_event(db, subject_type: str, subject_id: int, event: str,
+                        *, actor: str = "reviewer", note: str | None = None) -> None:
+    """Append to the review trail. Deliberately best-effort: an audit-log failure
+    must never block or roll back the review action it is describing."""
+    try:
+        db.execute(
+            """INSERT INTO review_events (subject_type, subject_id, event, actor, note, created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (subject_type, subject_id, event, actor, note,
+             datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+        )
+        db.commit()
+    except sqlite3.Error as exc:
+        print(f"[WARNING] Could not record review event {event} for {subject_type}#{subject_id}: {exc}")
+
+
 def seed_companies_from_file(db, path: str | None = None) -> int:
     """Load watchlist.json into `companies`. Insert-only: an existing row is left
     alone, so edits made through the UI are never clobbered by a restart. Returns
@@ -1542,27 +1558,28 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    """Save the PDF, run the LLM extraction, and stage the result in
-    pending_reviews. Nothing is written to pdf_metadata at this point —
-    that only happens once a human approves the generated report via
-    POST /pending/<id>/approve."""
-    if "file" not in request.files:
-        return jsonify({"error": "No file part"}), 400
+def ingest_pdf_bytes(
+    db,
+    file_bytes: bytes,
+    filename: str,
+    *,
+    save_folder: str | None = None,
+    source_attachment_id: int | None = None,
+) -> dict:
+    """Hash, deduplicate, save, extract and stage a PDF for human review.
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "No file selected"}), 400
-    if not allowed_file(file.filename):
-        return jsonify({"error": "Only PDF files are accepted"}), 400
+    This is the ONLY way a PDF enters the system. Both the manual upload route
+    and the monitored-attachment route call it, so a discovered PDF cannot end
+    up on a second, weaker path that skips the unit-scale audit or the review
+    gate. Nothing here writes to pdf_metadata — that still requires a human
+    approving via POST /pending/<id>/approve.
 
-    # Read into memory so we can hash before touching disk
-    file_bytes = file.read()
+    Returns a plain dict, not an HTTP response, so callers map it themselves:
+      {"status": "duplicate", "scope": "approved"|"pending", "existing_id": N, ...}
+      {"status": "pending_review", "id": N, ...}
+    """
     file_size = len(file_bytes)
     sha256 = hashlib.sha256(file_bytes).hexdigest()
-
-    db = get_db()
 
     # Duplicate check — against approved entries...
     existing = db.execute(
@@ -1570,14 +1587,12 @@ def upload():
         (sha256, file_size),
     ).fetchone()
     if existing:
-        return jsonify({
-            "error": "duplicate",
-            "message": (
-                f'This file has already been uploaded and approved as "{existing["filename"]}"'
-                f" (entry #{existing['id']})."
-            ),
+        return {
+            "status": "duplicate",
+            "scope": "approved",
             "existing_id": existing["id"],
-        }), 409
+            "existing_filename": existing["filename"],
+        }
 
     # ...and against reviews still awaiting a decision
     pending_existing = db.execute(
@@ -1585,22 +1600,21 @@ def upload():
         (sha256, file_size),
     ).fetchone()
     if pending_existing:
-        return jsonify({
-            "error": "duplicate",
-            "message": (
-                f'This file is already awaiting review as "{pending_existing["filename"]}"'
-                f" (pending #{pending_existing['id']})."
-            ),
-            "existing_pending_id": pending_existing["id"],
-        }), 409
+        return {
+            "status": "duplicate",
+            "scope": "pending",
+            "existing_id": pending_existing["id"],
+            "existing_filename": pending_existing["filename"],
+        }
 
     # Save file
-    safe_name = os.path.basename(file.filename)
-    save_path = os.path.join(UPLOAD_FOLDER, safe_name)
+    folder = save_folder or UPLOAD_FOLDER
+    safe_name = os.path.basename(filename)
+    save_path = os.path.join(folder, safe_name)
     if os.path.exists(save_path):
         base, ext = os.path.splitext(safe_name)
         safe_name = f"{base}_{int(datetime.utcnow().timestamp())}{ext}"
-        save_path = os.path.join(UPLOAD_FOLDER, safe_name)
+        save_path = os.path.join(folder, safe_name)
     with open(save_path, "wb") as f:
         f.write(file_bytes)
 
@@ -1622,16 +1636,23 @@ def upload():
     cur = db.execute(
         """INSERT INTO pending_reviews (
                filename, file_size, sha256, pages, title, author, creator, uploaded_at,
-               extracted_data, attempt_count, extra_instructions, created_at, updated_at
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               extracted_data, attempt_count, extra_instructions, created_at, updated_at,
+               source_attachment_id
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             safe_name, file_size, sha256, meta["pages"],
             meta["title"], meta["author"], meta["creator"], uploaded_at,
             json.dumps(extracted_data), 1, "[]", uploaded_at, uploaded_at,
+            source_attachment_id,
         ),
     )
     db.commit()
     pending_id = cur.lastrowid
+    record_review_event(
+        db, "pending", pending_id, "extracted",
+        note=f"Ingested {safe_name}"
+        + (f" from attachment #{source_attachment_id}" if source_attachment_id else " by upload"),
+    )
 
     # Generate the draft PDF report the reviewer will download and read.
     report_available = False
@@ -1642,7 +1663,7 @@ def upload():
     except Exception as exc:
         print(f"[WARNING] Could not generate PDF report for pending entry #{pending_id}: {exc}")
 
-    return jsonify({
+    return {
         "id":                pending_id,
         "status":            "pending_review",
         "filename":          safe_name,
@@ -1662,7 +1683,60 @@ def upload():
             "Review report generated. Download and read it, then approve or fail "
             "the evaluation — figures are not saved until approved."
         ),
-    }), 201
+    }
+
+
+def locate_pending_file(filename: str) -> str | None:
+    """Resolve a pending review's stored PDF. Manual uploads land in uploads/ and
+    monitored attachments in attachments/, so both are searched — otherwise a
+    rerun or discard of a monitored PDF would fail to find its own source file."""
+    for folder in (UPLOAD_FOLDER, ATTACHMENTS_FOLDER):
+        path = os.path.join(folder, filename)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _duplicate_response(result: dict):
+    """Map a duplicate result from ingest_pdf_bytes() onto the 409 body the
+    frontend already knows how to render."""
+    if result["scope"] == "approved":
+        return jsonify({
+            "error": "duplicate",
+            "message": (
+                f'This file has already been uploaded and approved as "{result["existing_filename"]}"'
+                f" (entry #{result['existing_id']})."
+            ),
+            "existing_id": result["existing_id"],
+        }), 409
+    return jsonify({
+        "error": "duplicate",
+        "message": (
+            f'This file is already awaiting review as "{result["existing_filename"]}"'
+            f" (pending #{result['existing_id']})."
+        ),
+        "existing_pending_id": result["existing_id"],
+    }), 409
+
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    """HTTP wrapper around ingest_pdf_bytes(). Validates the request, then hands
+    off to the shared ingestion path."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "No file selected"}), 400
+    if not allowed_file(file.filename):
+        return jsonify({"error": "Only PDF files are accepted"}), 400
+
+    # Read into memory so we can hash before touching disk
+    result = ingest_pdf_bytes(get_db(), file.read(), file.filename)
+    if result["status"] == "duplicate":
+        return _duplicate_response(result)
+    return jsonify(result), 201
 
 
 @app.route("/pending", methods=["GET"])
@@ -1712,6 +1786,7 @@ def download_pending_report(pending_id):
         (datetime.utcnow().isoformat(timespec="seconds") + "Z", pending_id),
     )
     db.commit()
+    record_review_event(db, "pending", pending_id, "downloaded")
 
     extracted_data = json.loads(row["extracted_data"])
     company = (extracted_data.get("company_name") or "pending").strip().replace(" ", "_") or "pending"
@@ -1807,6 +1882,13 @@ def approve_pending(pending_id):
     except Exception as exc:
         print(f"[WARNING] Could not generate final PDF report for entry #{new_id}: {exc}")
 
+    # The pending row is about to be deleted, so record the trail against both
+    # subjects: the pending id that is disappearing and the entry it became.
+    record_review_event(db, "pending", pending_id, "approved",
+                        note=f"Promoted to approved entry #{new_id}")
+    record_review_event(db, "approved", new_id, "approved",
+                        note=f"Promoted from pending #{pending_id}")
+
     # Clean up the draft report and the pending record now it's been promoted
     if row["report_path"] and os.path.exists(row["report_path"]):
         os.remove(row["report_path"])
@@ -1868,8 +1950,8 @@ def reject_pending(pending_id):
     if new_instruction:
         extra_instructions.append(new_instruction)
 
-    save_path = os.path.join(UPLOAD_FOLDER, row["filename"])
-    if not os.path.exists(save_path):
+    save_path = locate_pending_file(row["filename"])
+    if not save_path:
         return jsonify({"error": f"Source file '{row['filename']}' is missing on disk — cannot rerun."}), 500
 
     combined_instructions = "\n".join(f"- {s}" for s in extra_instructions) if extra_instructions else None
@@ -1899,6 +1981,11 @@ def reject_pending(pending_id):
         (json.dumps(extracted_data), next_attempt, json.dumps(extra_instructions), now, pending_id),
     )
     db.commit()
+    record_review_event(
+        db, "pending", pending_id, "rejected",
+        note=(f"Re-run as attempt {next_attempt}"
+              + (f'; reviewer instruction: "{new_instruction}"' if new_instruction else "")),
+    )
 
     row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
     report_available = False
@@ -1934,11 +2021,13 @@ def delete_pending(pending_id):
     ).fetchone()
     if not row:
         return jsonify({"error": "Not found"}), 404
-    path = os.path.join(UPLOAD_FOLDER, row["filename"])
-    if os.path.exists(path):
+    path = locate_pending_file(row["filename"])
+    if path:
         os.remove(path)
     if row["report_path"] and os.path.exists(row["report_path"]):
         os.remove(row["report_path"])
+    record_review_event(db, "pending", pending_id, "discarded",
+                        note=f"Discarded {row['filename']} without saving")
     db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
     db.commit()
     return jsonify({"deleted": pending_id})
