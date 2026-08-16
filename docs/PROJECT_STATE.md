@@ -127,7 +127,10 @@ and that warning is carried through approval by `_SOURCE_ONLY_WARNING_RE` since 
 no longer has the PDF text.
 
 Evidence is built *after* the unit-scale audit, so a corrected figure is traced to the line it
-was corrected against rather than to the model's original wrong value.
+was corrected against rather than to the model's original wrong value — and *from the packaged
+data*, so it describes the figures the record actually holds. That second point matters: packaging
+replaces the previous-quarter fields with DB-derived values, so tracing the raw analysis made the
+traceability table cite a source line for a figure the summary above it showed as "—".
 
 Observations are written against `pending_review_id` at ingest and re-pointed to
 `pdf_metadata_id` on approval, so provenance survives the pending row being deleted. A rerun
@@ -191,9 +194,14 @@ in the suite rather than in production.
 ## Known limitations
 
 - **The evidence prompt change has not been evaluated live.** `EARNINGS_SYSTEM_PROMPT` now asks
-  for source quotes, which changes what the model returns. Replays of the stored runs still pass
-  5/5 and all 30 fixture figures trace deterministically, but no live run has happened since the
-  prompt changed. Until it does, `llm_verified` coverage is untested against the real model.
+  for source quotes, which changes what the model returns. Simulating three model behaviours —
+  no evidence block, genuine quotes, fabricated quotes — through the real `_evaluate_case()` gives
+  5/5 in all three, because the deterministic fallback locates every figure in these fixtures even
+  when the quotes are worthless. That is the closest available offline proxy, but `llm_verified`
+  coverage remains untested against the real model.
+- **The evaluation cannot be run from this environment.** The runtime blocks it because it sends
+  local test PDFs to the external API. Run it yourself with `POST /evaluate` or
+  `run_evaluation()`.
 - Anchoring assumes `,` thousands separators. Documents using `.` or spaces fall through to the
   "scale unverified" warning rather than being mis-corrected.
 - QoQ/YoY DB lookup matches company names case-insensitively; slightly different extracted names
