@@ -293,13 +293,25 @@ KLSE Screener is never referenced as a source.
 
 Evidence capture is built — see **Evidence and source traceability** above.
 
+### Two-stage filtering
+
+`cat=FA,FRCO` is the category filter the site's own *Financial Results* control sends. It takes
+the listing from **2,087,762 announcements to 1,081**, so a poll reads a shortlist rather than a
+haystack. It is the default; `--category ""` disables it, and `--market` / `--sector` /
+`--subsector` expose the rest.
+
+The category is **not sufficient on its own** — it still admits filings like *"Change in Financial
+Year End"* — so `looks_like_results()` remains the second gate, matching on the title.
+
+That gate must stay generous. Not every results filing says "quarterly": Key Asic's 2026-07-22
+announcement is titled *"Consolidated results for the financial period ended 31/05/2026"*, and an
+earlier version of the pattern list dropped it silently. A missed filing produces no error, so
+the failure is invisible — prefer a false positive, which a human sees and discards.
+
 ### What is still unverified about Bursa
 
-The row shape is confirmed. These are not:
+The row shape and the category filter are confirmed. These are not:
 
-- **The `cat=` value for financial results.** Left empty, so the listing returns every
-  announcement type and the results filter runs client-side on the title. Supplying it would cut
-  the volume considerably.
 - **Whether `dt_ht` / `dt_lt` are date-from and date-to.** `--since` filters client-side instead.
 - **The HTML fallback layout** — the rendered page 403s to automated clients, so that fixture
   mirrors the JSON column order rather than a captured page.

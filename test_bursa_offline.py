@@ -178,6 +178,38 @@ check("and it is the POS Malaysia quarterly report",
 check("boardroom changes are not mistaken for results",
       not any("Boardroom" in r.title for r in results))
 
+print("\npipeline: the category filter narrows, but does not replace, the title gate")
+# Real capture with cat=FA,FRCO — the site's own Financial Results filter, which
+# takes the listing from 2,087,762 rows to 1,081. It still admits filings that
+# are not results, so the title gate stays necessary.
+results_live = parse_json(fixture("announcements_results_live.json"))
+check("all six category-filtered rows parsed", len(results_live) == 6, str(len(results_live)))
+
+kept = [a for a in results_live if looks_like_results(a)]
+dropped = [a for a in results_live if not looks_like_results(a)]
+check("five of six are results filings", len(kept) == 5, str(len(kept)))
+check("'Change in Financial Year End' is dropped despite being in the category",
+      len(dropped) == 1 and dropped[0].title == "Change in Financial Year End",
+      str([d.title for d in dropped]))
+
+# The regression this fixture exists for: Key Asic's filing says "Consolidated
+# results…" with no "Quarterly rpt" prefix, and was silently dropped before.
+key_asic = [a for a in kept if a.title.startswith("Consolidated results")]
+check("a results filing without the word 'quarterly' is kept",
+      len(key_asic) == 1, str([a.title[:50] for a in kept]))
+check("  and it is Key Asic, code 0143",
+      key_asic and key_asic[0].stock_code == "0143",
+      repr(key_asic[0].stock_code if key_asic else None))
+
+amp = [a for a in results_live if a.stock_code == "7204"]
+check("an ampersand in a company name survives parsing",
+      amp and amp[0].company_name == "D & O GREEN TECHNOLOGIES BERHAD",
+      repr(amp[0].company_name if amp else None))
+
+check("dd/mm/yyyy inside a title does not become the announcement date",
+      all(a.announced_at and a.announced_at.startswith("2026-") for a in results_live),
+      str([a.announced_at for a in results_live]))
+
 print("\nparser: attachments come from the announcement detail page")
 from bursa.parser import parse_attachment_page  # noqa: E402
 

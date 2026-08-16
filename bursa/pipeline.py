@@ -21,6 +21,10 @@ from .verify import VERIFIED, verify_pdf_bytes
 # everything that does match before any money is spent.
 RESULTS_PATTERNS = (
     re.compile(r"quarterly\s+r(?:e)?p(?:or)?t", re.I),
+    # Not every results filing says "quarterly". Bursa's own FA,FRCO category
+    # returned "Consolidated results for the financial period ended 31/05/2026"
+    # (Key Asic, 2026-07-22), which the quarterly pattern misses entirely.
+    re.compile(r"\bconsolidated\s+results?\b", re.I),
     re.compile(r"\bfinancial\s+results?\b", re.I),
     re.compile(r"\binterim\s+(?:financial\s+)?report\b", re.I),
     re.compile(r"\bcondensed\s+consolidated\b", re.I),

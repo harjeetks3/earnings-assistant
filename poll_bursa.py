@@ -26,6 +26,13 @@ import app  # noqa: E402
 from bursa import pipeline  # noqa: E402
 from bursa.client import DEFAULT_USER_AGENT, BursaClient, FixtureClient  # noqa: E402
 
+# What the site's own "Financial Results" filter sends. Observed 2026-08-16:
+# it takes the listing from 2,087,762 announcements down to 1,081, which is the
+# difference between reading a haystack and reading a shortlist. The category
+# is not sufficient on its own -- it still includes filings like "Change in
+# Financial Year End" -- so the title filter in pipeline.py remains the second gate.
+DEFAULT_CATEGORY = "FA,FRCO"
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -52,6 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Listing rows per request (20 is the value the site itself uses)")
     p.add_argument("--pages", type=int, default=2,
                    help="Listing pages to walk per run")
+    p.add_argument("--category", default=DEFAULT_CATEGORY,
+                   help=f"Bursa announcement category filter (default {DEFAULT_CATEGORY!r}, "
+                        f"which is what the site's Financial Results filter sends). "
+                        f"Pass an empty string for every category.")
+    p.add_argument("--market", default="",
+                   help="Optional market filter, e.g. MAIN-MKT")
+    p.add_argument("--sector", default="",
+                   help="Optional sector filter, e.g. TECHNOLOGY")
+    p.add_argument("--subsector", default="",
+                   help="Optional sub-sector filter, e.g. SEMICONDUCTORS")
     p.add_argument("--user-agent", default=DEFAULT_USER_AGENT,
                    help="Override the identifying User-Agent (keep a contact address in it)")
     p.add_argument("--cache-dir", default=os.path.join(BASE_DIR, "bursa_cache"),
@@ -87,8 +104,8 @@ def main(argv=None) -> int:
         "ann_type": "company",
         "company": "", "keyword": "",
         "dt_ht": "", "dt_lt": "",
-        "cat": "", "sub_type": "",
-        "mkt": "", "sec": "", "subsec": "",
+        "cat": args.category, "sub_type": "",
+        "mkt": args.market, "sec": args.sector, "subsec": args.subsector,
         "per_page": args.per_page,
         "page": 1,
     }
