@@ -395,8 +395,8 @@ Suggested capture procedure:
 |---|---|---|---|
 | PDF upload | Valid PDF upload route and UI flow | Implemented, not freshly live-tested in this pass | `POST /upload` accepts PDFs, saves files, extracts metadata/text, runs LLM, stages pending review. |
 | Duplicate detection | Same PDF uploaded twice | Implemented, not covered by stored evaluation JSON | Uses SHA-256 + file size against both approved and pending tables; returns HTTP 409. |
-| JSON extraction | Expected fields returned from synthetic PDFs | 3/5 passed in latest stored evaluation | NorthPeak, Lindqvist, and Aurora passed; Yamato and Trans-Pacific failed numeric scale fields. |
-| Validation warnings | Expected warnings matched | Mixed | Clean cases matched no warnings; Trans-Pacific produced PBT > revenue warning but missed expected low-confidence warning. |
+| JSON extraction | Expected fields returned from synthetic PDFs | 3/5 in latest stored live run; 5/5 on offline replay after the unit-scale fix | NorthPeak, Lindqvist, and Aurora passed live; Yamato and Trans-Pacific failed on numeric scale and are corrected by `_audit_unit_scale()` on replay. Not yet re-run live. |
+| Validation warnings | Expected warnings matched | Mixed live; matching on replay | Clean cases matched no warnings. Trans-Pacific produced the PBT > revenue warning but missed the expected low-confidence one, which was untestable (model self-reported 0.98) and has been replaced with a metadata-contradiction check. |
 | QoQ/YoY calculation | Deterministic `pct_change` with `abs(prior)` | Passed for all five stored evaluation cases | Even failed scale cases had matching growth percentages because current/prior values were scaled consistently. |
 | Golden cases | Clean PDFs | 2/2 passed | USD and SEK clean cases passed latest stored run. |
 | Edge cases | Loss-maker, non-calendar FY | 1/2 passed | Aurora passed; Yamato failed due numeric scaling for JPY million. |
@@ -449,8 +449,8 @@ Page 2:
 Page 3:
 
 - Evaluation methodology: five synthetic selectable-text PDFs, golden/edge/adversarial categories, expected results JSON, numeric tolerances, warning comparison, acceptable alternatives.
-- Evaluation results: latest stored run 3/5 passed, with a small table by case.
-- Discuss failures: unit normalization on JPY million and `$ '000`, missing low-confidence warning, while prompt injection was resisted.
+- Evaluation results: latest stored live run 3/5 passed, with a small table by case. State plainly that the 5/5 figure is an offline replay after the fix, not a fresh live run.
+- Discuss failures: both were one systematic 1000x unit-scale slip (JPY million and `$ '000`), now detected and corrected against figures printed in the document by `_audit_unit_scale()`; the low-confidence expectation was untestable and was replaced by a metadata-contradiction check. Prompt injection was resisted throughout.
 
 Page 4:
 
