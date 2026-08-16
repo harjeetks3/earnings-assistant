@@ -183,7 +183,7 @@ def generate_report_pdf(data: dict, out_path: str) -> None:
         story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb"), spaceAfter=6))
         generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
         story.append(Paragraph(
-            f"Auto-generated from a GPT-4o-mini extraction of entry #{data.get('id', '—')}. "
+            f"Auto-generated from a GPT-5.4-mini extraction of entry #{data.get('id', '—')}. "
             f"Report generated {generated}. This report is provided for human review — "
             f"verify all figures against the source PDF before relying on them.",
             meta_style,
@@ -528,7 +528,7 @@ def analyse_earnings(pdf_text: str, extra_instructions: str | None = None) -> di
 
     except Exception as exc:
         error_msg = str(exc)
-        print(f"\n[ERROR] GPT-4o-mini analysis failed: {error_msg}\n")
+        print(f"\n[ERROR] GPT-5.4-mini analysis failed: {error_msg}\n")
         return {"analysis_error": error_msg}
 
 
@@ -1433,13 +1433,13 @@ def reject_pending(pending_id):
     combined_instructions = "\n".join(f"- {s}" for s in extra_instructions) if extra_instructions else None
 
     next_attempt = row["attempt_count"] + 1
-    print(f"\n[INFO] Rerunning GPT-4o-mini analysis for pending #{pending_id} "
+    print(f"\n[INFO] Rerunning GPT-5.4-mini analysis for pending #{pending_id} "
           f"(attempt {next_attempt}) with reviewer instructions: {extra_instructions}")
     pdf_text = extract_pdf_text(save_path)
     extracted_data = _run_llm_pipeline(pdf_text, db, extra_instructions=combined_instructions)
 
     print("\n" + "=" * 50)
-    print(f"GPT-4o-mini Earnings Analysis — rerun (attempt {next_attempt}, still pending review)")
+    print(f"GPT-5.4-mini Earnings Analysis — rerun (attempt {next_attempt}, still pending review)")
     print("=" * 50)
     print(json.dumps(extracted_data, indent=2, ensure_ascii=False))
     print("=" * 50 + "\n")
@@ -1586,5 +1586,5 @@ if __name__ == "__main__":
     init_db()
     print("Starting Earnings Report Assistant at http://localhost:5000")
     if not os.environ.get("OPENAI_API_KEY"):
-        print("[WARNING] OPENAI_API_KEY is not set — GPT-4o-mini analysis will be skipped.")
+        print("[WARNING] OPENAI_API_KEY is not set — GPT-5.4-mini analysis will be skipped.")
     app.run(debug=True, host="0.0.0.0", port=5000)

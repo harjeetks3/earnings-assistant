@@ -880,12 +880,12 @@
         });
 
         xhr.upload.addEventListener("load", () => {
-          // Upload done — now waiting for GPT-4o-mini analysis on the server
+          // Upload done — now waiting for GPT-5.4-mini analysis on the server
           barWrap.style.display = "none";
           label.innerHTML = `
             <div class="analysing-label">
               <div class="spinner"></div>
-              Analysing <strong>${file.name}</strong> with GPT-4o-mini…
+              Analysing <strong>${file.name}</strong> with GPT-5.4-mini…
             </div>`;
         });
 
