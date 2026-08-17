@@ -306,7 +306,22 @@ def generate_report_pdf(data: dict, out_path: str) -> None:
         rows = [["Figure", "Page", "As printed in the source"]]
         for item in trace:
             label = item.get("metric", "").replace("_", " ")
-            if item.get("verified"):
+            current = data.get(item.get("metric"))
+            recorded = item.get("value_millions")
+            stale = (
+                isinstance(current, (int, float)) and isinstance(recorded, (int, float))
+                and abs(current - recorded) > 1e-9
+            )
+
+            if stale:
+                # The figure was rewritten after this trace was taken — comparison
+                # columns are recomputed from the database whenever a sibling
+                # quarter is approved. Showing the old citation next to the new
+                # number would be a false attribution, so say so instead.
+                page, shown = "—", "figure has changed since this trace was taken — re-verify"
+            elif item.get("match_method") == MATCH_PRIOR_ENTRY:
+                page, shown = "—", "carried from a previously approved entry, not this document"
+            elif item.get("verified"):
                 page = f"p.{item['page_number']}" if item.get("page_number") else "—"
                 printed = (item.get("printed_form") or "").strip()
                 shown = printed if len(printed) <= 70 else printed[:67] + "…"
@@ -561,9 +576,10 @@ def _audit_unit_scale(raw: dict, pdf_text: str) -> tuple[dict, list[str]]:
 # offset and page. A quote that cannot be located is stored as UNVERIFIED rather
 # than dropped: a missing trace is information the reviewer needs.
 
-MATCH_LLM_VERIFIED = "llm_verified"    # model quote found verbatim in the source
+MATCH_LLM_VERIFIED = "llm_verified"    # model quote found verbatim, containing the figure
 MATCH_DETERMINISTIC = "deterministic"  # no usable quote; code located the figure itself
 MATCH_UNVERIFIED = "unverified"        # neither worked — provenance is genuinely missing
+MATCH_PRIOR_ENTRY = "prior_entry"      # value came from an approved filing, not this document
 
 _SNIPPET_PAD = 60
 
@@ -599,12 +615,104 @@ def locate_quote(quote: str, pdf_text: str) -> tuple[int, int] | None:
     return (match.start(), match.end()) if match else None
 
 
-def build_evidence(analysis: dict, pdf_text: str, pages: list) -> list[dict]:
+def _span_contains_figure(span, value: float, factor: float, pdf_text: str) -> bool:
+    """Does the cited passage actually contain the number it is cited for?
+
+    Locating a quote only proves the sentence exists. A genuine but mis-keyed
+    quote — boilerplate, a cumulative-period row, another metric's line — would
+    otherwise be stamped verified and printed under "As printed in the source"
+    with a page number, which is worse than admitting we could not trace it.
+
+    Both ways a document states a figure count: the table row carries it as
+    printed ("48,200" under a US$'000 heading) while the narrative carries it
+    already scaled ("US$48.2 million"). Either is a fair citation.
+    """
+    start, end = span
+    passage = pdf_text[start:end]
+    forms = _printed_forms(abs(value) / factor) + _printed_forms(abs(value))
+    return any(_anchored(form, passage) for form in forms)
+
+
+def _digit_count(form: str) -> int:
+    return sum(c.isdigit() for c in form)
+
+
+# Below this many digits a match is coincidence, not evidence: "6.9" finds a
+# growth percentage. Mirrors _MIN_ANCHOR_MAGNITUDE in the unit-scale audit.
+_MIN_ANCHOR_DIGITS = 3
+
+# How far back to look for the line's label. A statement row puts the caption
+# immediately before the figures; a narrative sentence names the metric a few
+# words earlier.
+_LABEL_WINDOW = 90
+
+# A figure appears several times in a real report — once in the narrative, once
+# in the statement, often again in the MD&A — so "appears more than once" is not
+# ambiguity. The danger is a DIFFERENT line item sharing the value: 121 is both
+# "Profit before tax 148 132 121" and "Selling expenses (121)". Matching the
+# caption is what tells those apart.
+_METRIC_LABELS = {
+    "revenue": re.compile(r"revenue|net\s+sales|turnover|total\s+income", re.I),
+    "pbt": re.compile(
+        r"(?:profit|loss|earnings)[^.\n]{0,30}?before\s+(?:tax|taxation)"
+        r"|before\s+(?:tax|taxation)"
+        r"|ordinary\s+(?:profit|income)"
+        r"|pre-?tax",
+        re.I,
+    ),
+}
+
+
+def _locate_figure(value: float, factor: float, pdf_text: str, metric: str = ""):
+    """Find the figure's own printed form, preferring a match under the right
+    caption.
+
+    A wrong match here is worse than no match: the audit only counts votes,
+    whereas this is shown to the reviewer as the source line, with a page
+    number, under the heading "As printed in the source".
+    """
+    family = "revenue" if metric.startswith("revenue") else "pbt" if metric.startswith("pbt") else ""
+    label = _METRIC_LABELS.get(family)
+
+    for form in _printed_forms(abs(value) / factor):
+        if _digit_count(form) < _MIN_ANCHOR_DIGITS:
+            continue
+        hits = [
+            m for m in re.finditer(rf"(?<![\d,.]){re.escape(form)}(?![\d,.])", pdf_text)
+            # A percentage is never the source of a monetary figure.
+            if not pdf_text[m.end():m.end() + 1].strip().startswith("%")
+        ]
+        if not hits:
+            continue
+
+        if label:
+            captioned = [
+                m for m in hits
+                if label.search(pdf_text[max(0, m.start() - _LABEL_WINDOW):m.start()])
+            ]
+            if captioned:
+                return captioned[0].start(), captioned[0].end()
+
+        # No caption matched. Accept only an unambiguous single occurrence —
+        # picking one of several unlabelled candidates would be a guess.
+        if len(hits) == 1:
+            return hits[0].start(), hits[0].end()
+    return None
+
+
+def build_evidence(analysis: dict, pdf_text: str, pages: list,
+                   document_sourced: set | None = None) -> list[dict]:
     """One evidence record per monetary field that has a value.
 
     Returns dicts ready for the `evidence` table. Fields with a value always
     produce a record, even when nothing can be traced — that record just carries
     match_method='unverified'.
+
+    `document_sourced` names the fields whose value actually came from THIS
+    document. Comparison figures are overwritten during packaging with values
+    from a previously approved filing, and citing a line of the uploaded PDF for
+    a number that came from somewhere else is a fabricated citation, however
+    real the quoted line is. Those are recorded as `prior_entry` instead.
     """
     claimed = analysis.get("evidence") or {}
     if not isinstance(claimed, dict):
@@ -616,19 +724,28 @@ def build_evidence(analysis: dict, pdf_text: str, pages: list) -> list[dict]:
         if not isinstance(value, (int, float)):
             continue
 
+        if document_sourced is not None and field not in document_sourced:
+            records.append({
+                "metric": field, "page_number": None, "char_start": None,
+                "char_end": None,
+                "snippet": "Carried from a previously approved entry for this "
+                           "company, not read from this document.",
+                "printed_form": None,
+                "match_method": MATCH_PRIOR_ENTRY, "verified": 0,
+            })
+            continue
+
+        factor = _scale_factor(analysis.get("unit_raw")) or 1.0
         span = locate_quote(str(claimed.get(field) or ""), pdf_text)
         method = MATCH_LLM_VERIFIED if span else None
 
+        # A quote that does not contain its own figure is not evidence for it.
+        if span and not _span_contains_figure(span, value, factor, pdf_text):
+            span, method = None, None
+
         if span is None:
-            # No usable quote. Fall back to locating the figure's own printed
-            # form — the same anchoring the unit-scale audit uses.
-            factor = _scale_factor(analysis.get("unit_raw")) or 1.0
-            for form in _printed_forms(abs(value) / factor):
-                match = re.search(rf"(?<![\d,.]){re.escape(form)}(?![\d,.])", pdf_text)
-                if match:
-                    span = (match.start(), match.end())
-                    method = MATCH_DETERMINISTIC
-                    break
+            span = _locate_figure(value, factor, pdf_text, metric=field)
+            method = MATCH_DETERMINISTIC if span else None
 
         if span is None:
             records.append({
@@ -1226,15 +1343,23 @@ def _run_llm_pipeline(
     data = _package_extracted_data(analysis, analysis_error, [], growth)
     if not analysis_error:
         # Trace the figures the RECORD holds, not the model's raw output.
-        # Packaging replaces the previous-quarter fields with DB-derived values
-        # (they are DB-only by design), so tracing the raw analysis would cite a
-        # source line for a figure the report itself shows as absent — the
-        # traceability table would contradict the financial summary above it.
+        # Packaging replaces the comparison fields with values from previously
+        # approved filings, so tracing the raw analysis would cite a line of
+        # THIS document for a number that came from a different one.
+        #
+        # A field is document-sourced only when packaging left it as the model
+        # read it. Anything else is carried from a prior entry and is recorded
+        # as such rather than given a page citation here.
         #
         # Built after the unit audit too, so a corrected figure is traced to the
         # line it was corrected against, not to the model's original wrong value.
+        document_sourced = {
+            field for field in MONETARY_FIELDS
+            if data.get(field) is not None and data.get(field) == analysis.get(field)
+        }
         evidence_records = build_evidence(
-            {**data, "evidence": analysis.get("evidence")}, pdf_text, pages or [])
+            {**data, "evidence": analysis.get("evidence")}, pdf_text, pages or [],
+            document_sourced=document_sourced)
         warnings = (scale_warnings
                     + evidence_summary_warning(evidence_records)
                     + validate_analysis(data, pdf_meta=pdf_meta))
@@ -1467,7 +1592,8 @@ def load_evidence(db, *, pdf_metadata_id: int | None = None,
         return []
     try:
         rows = db.execute(
-            f"""SELECT o.metric, e.page_number, e.printed_form, e.match_method, e.verified
+            f"""SELECT o.metric, o.value_millions,
+                       e.page_number, e.printed_form, e.match_method, e.verified
                   FROM metric_observations o
                   JOIN evidence e ON e.metric_observation_id = o.id
                  WHERE {where}""",
@@ -2005,10 +2131,29 @@ def ingest_pdf_bytes(
     }
 
 
-def locate_pending_file(filename: str) -> str | None:
-    """Resolve a pending review's stored PDF. Manual uploads land in uploads/ and
-    monitored attachments in attachments/, so both are searched — otherwise a
-    rerun or discard of a monitored PDF would fail to find its own source file."""
+def locate_pending_file(filename: str, db=None,
+                        source_attachment_id: int | None = None) -> str | None:
+    """Resolve a pending review's stored PDF, by provenance where possible.
+
+    Searching by bare filename is not safe on its own: uploads/ and attachments/
+    de-collide only within themselves, so a monitored filing and an unrelated
+    manual upload can share a basename. Resolving by name alone then re-extracts
+    the wrong document on a rerun, and — worse — deletes the wrong file on
+    discard. When the review came from the monitor, its attachment row records
+    exactly which file is meant, so use that.
+    """
+    if db is not None and source_attachment_id:
+        try:
+            row = db.execute(
+                "SELECT local_path FROM attachments WHERE id = ?",
+                (source_attachment_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row and row["local_path"] and os.path.exists(row["local_path"]):
+            return row["local_path"]
+
+    # No provenance recorded: a manual upload, which lives in uploads/.
     for folder in (UPLOAD_FOLDER, ATTACHMENTS_FOLDER):
         path = os.path.join(folder, filename)
         if os.path.exists(path):
@@ -2274,6 +2419,17 @@ def approve_pending(pending_id):
     new_id = cur.lastrowid
     _refresh_approved_comparisons(db)
 
+    # Re-point the provenance at the approved entry BEFORE building the report.
+    # The observations are separate rows, so they survive the pending row being
+    # deleted — but load_evidence() keys on pdf_metadata_id, so building first
+    # produced an approved report with no Source Traceability section at all,
+    # and persisted report_path pointing at it.
+    db.execute(
+        "UPDATE metric_observations SET pdf_metadata_id = ? WHERE pending_review_id = ?",
+        (new_id, pending_id),
+    )
+    db.commit()
+
     report_available = False
     try:
         new_row = db.execute("SELECT * FROM pdf_metadata WHERE id = ?", (new_id,)).fetchone()
@@ -2281,15 +2437,6 @@ def approve_pending(pending_id):
         report_available = True
     except Exception as exc:
         print(f"[WARNING] Could not generate final PDF report for entry #{new_id}: {exc}")
-
-    # Re-point the provenance at the approved entry. The observations are
-    # separate rows, so they survive the pending row being deleted — this is
-    # what keeps an approved figure traceable to the line it came from.
-    db.execute(
-        "UPDATE metric_observations SET pdf_metadata_id = ? WHERE pending_review_id = ?",
-        (new_id, pending_id),
-    )
-    db.commit()
 
     # The pending row is about to be deleted, so record the trail against both
     # subjects: the pending id that is disappearing and the entry it became.
@@ -2359,7 +2506,8 @@ def reject_pending(pending_id):
     if new_instruction:
         extra_instructions.append(new_instruction)
 
-    save_path = locate_pending_file(row["filename"])
+    save_path = locate_pending_file(
+        row["filename"], db, row["source_attachment_id"])
     if not save_path:
         return jsonify({"error": f"Source file '{row['filename']}' is missing on disk — cannot rerun."}), 500
 
@@ -2439,13 +2587,24 @@ def delete_pending(pending_id):
     saving anything to pdf_metadata."""
     db = get_db()
     row = db.execute(
-        "SELECT filename, report_path FROM pending_reviews WHERE id = ?", (pending_id,)
+        "SELECT filename, report_path, sha256, source_attachment_id "
+        "FROM pending_reviews WHERE id = ?", (pending_id,)
     ).fetchone()
     if not row:
         return jsonify({"error": "Not found"}), 404
-    path = locate_pending_file(row["filename"])
+
+    # Deleting is irreversible, so confirm the file on disk is the one this
+    # review was made from before removing it. A basename collision between
+    # uploads/ and attachments/ would otherwise destroy an unrelated document.
+    path = locate_pending_file(row["filename"], db, row["source_attachment_id"])
     if path:
-        os.remove(path)
+        with open(path, "rb") as f:
+            on_disk = hashlib.sha256(f.read()).hexdigest()
+        if on_disk == row["sha256"]:
+            os.remove(path)
+        else:
+            print(f"[WARNING] Not deleting {path}: its contents do not match "
+                  f"pending review #{pending_id}. Leaving it in place.")
     if row["report_path"] and os.path.exists(row["report_path"]):
         os.remove(row["report_path"])
     record_review_event(db, "pending", pending_id, "discarded",
@@ -2541,7 +2700,26 @@ def download_eval_result(filename):
 
 if __name__ == "__main__":
     init_db()
-    print("Starting Earnings Report Assistant at http://localhost:5000")
     if not os.environ.get("OPENAI_API_KEY"):
         print("[WARNING] OPENAI_API_KEY is not set — GPT-5.4-mini analysis will be skipped.")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+
+    # Loopback only, and no debugger.
+    #
+    # There is no authentication on any route, so anything that can reach this
+    # port can POST /pending/<id>/approve — writing to the database of record
+    # without a human — or POST /evaluate in a loop, which is five paid API
+    # calls per request. Binding 0.0.0.0 put both on every interface of
+    # whatever network the machine was on, and debug=True served the Werkzeug
+    # console alongside them.
+    #
+    # EARNINGS_BIND exists for the deliberate case (a reverse proxy that adds
+    # auth). It warns, because on an untrusted network it voids the mandatory
+    # human review this whole tool is built around.
+    host = os.environ.get("EARNINGS_BIND", "127.0.0.1")
+    if host != "127.0.0.1":
+        print(f"[WARNING] Binding {host} — every route is unauthenticated, including "
+              f"approval and evaluation. Only do this behind something that authenticates.")
+    debug = os.environ.get("EARNINGS_DEBUG", "").lower() in ("1", "true", "yes")
+
+    print(f"Starting Earnings Report Assistant at http://{host}:5000")
+    app.run(debug=debug, host=host, port=5000)

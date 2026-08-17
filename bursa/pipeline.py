@@ -13,6 +13,7 @@ import re
 
 from . import dedup, watchlist
 from .client import BlockedError, BursaClientError, RequestBudgetExceeded
+from .models import normalise_date
 from .parser import ParserError, parse_attachment_page, parse_html, parse_json
 from .verify import VERIFIED, verify_pdf_bytes
 
@@ -55,6 +56,10 @@ class PollSummary(dict):
     def __init__(self):
         super().__init__({f: 0 for f in self.FIELDS})
         self["messages"] = []
+        # Tracked separately from `errors` because being refused is the one
+        # outcome the operator must act on, and it can happen after a page has
+        # already parsed — which made an errors/parsed heuristic report success.
+        self["blocked"] = False
 
     def note(self, message: str):
         self["messages"].append(message)
@@ -70,6 +75,23 @@ def run_poll(db, client, *, since: str | None = None, limit: int | None = None,
     it. BlockedError is the exception: it stops the run immediately."""
     summary = PollSummary()
     announcements = []
+
+    # announced_at is always ISO; the boundary is whatever was typed. Comparing
+    # them as strings without normalising means "--since 2026-8-1" silently
+    # discards everything (because "2026-08-05" < "2026-8-1" lexically) and
+    # "--since 16 Aug 2026" silently matches everything — both with no error and
+    # a zero exit code, so a scheduled run reports success while queueing nothing.
+    if since:
+        normalised = normalise_date(since)
+        if normalised is None:
+            summary.note(
+                f"--since {since!r} is not a date this understands — refusing to "
+                f"filter on it rather than silently dropping every announcement. "
+                f"Use YYYY-MM-DD."
+            )
+            summary["errors"] += 1
+            return summary
+        since = normalised
 
     # ---- fetch + parse, one listing page at a time ----
     # The listing is not filtered by category, so a single page covers only the
@@ -87,6 +109,7 @@ def run_poll(db, client, *, since: str | None = None, limit: int | None = None,
             summary["fetched"] += 1
         except BlockedError as exc:
             summary.note(f"BLOCKED: {exc}")
+            summary["blocked"] = True
             summary["errors"] += 1
             return summary
         except (BursaClientError, RequestBudgetExceeded) as exc:
@@ -132,6 +155,7 @@ def run_poll(db, client, *, since: str | None = None, limit: int | None = None,
                          dry_run=dry_run, attachments_folder=attachments_folder)
         except BlockedError as exc:
             summary.note(f"BLOCKED: {exc}")
+            summary["blocked"] = True
             summary["errors"] += 1
             return summary
         except RequestBudgetExceeded as exc:
@@ -169,19 +193,28 @@ def _process_one(db, client, announcement, company, summary, *,
         # later poll would skip it as "already seen" and its PDF would never
         # arrive. Compare what is stored against what the listing offers, and
         # only retry when something is genuinely missing.
+        # "Any row exists" is not the same as "every file arrived". An
+        # announcement can link several PDFs, and if the second download failed
+        # mid-loop — a timeout, or the client's own per-run request cap — the
+        # first is stored while the rest are missing. Counting rows would call
+        # that handled and never fetch them again, on any poll, with no error.
+        # An unhashed row means "discovered but not yet downloaded".
+        pending_download = db.execute(
+            "SELECT COUNT(*) FROM attachments "
+            " WHERE announcement_id = ? AND sha256 IS NULL",
+            (announcement_id,),
+        ).fetchone()[0]
         stored = db.execute(
             "SELECT COUNT(*) FROM attachments WHERE announcement_id = ?",
             (announcement_id,),
         ).fetchone()[0]
-        # The listing does not say how many files an announcement has, so once
-        # anything is stored, treat it as handled. A first pass that found none
-        # (text-only announcement, or a failed detail fetch) is retried.
-        if stored:
+        if stored and not pending_download:
             return
-        summary.note(
-            f"retrying {len(announcement.attachments) - stored} missing attachment(s) "
-            f"for previously discovered {announcement.title[:60]!r}"
-        )
+        if pending_download:
+            summary.note(
+                f"resuming {pending_download} undownloaded attachment(s) for "
+                f"previously discovered {announcement.title[:60]!r}"
+            )
 
     # The listing carries date, company and title only — no files. The PDF is on
     # the announcement's own page, so fetch it, but only for the handful of
@@ -199,9 +232,37 @@ def _process_one(db, client, announcement, company, summary, *,
             )
             return
 
+    # Record every discovered file BEFORE downloading any of them, so a failure
+    # part-way through leaves a durable note of what is still outstanding.
     for attachment in attachments:
+        dedup.upsert_attachment(db, announcement_id, attachment)
+
+    # On a resume, only the files still missing their hash need fetching —
+    # re-downloading the ones that already arrived would spend requests to
+    # learn nothing, which is what the skip-if-seen logic exists to avoid.
+    done = {
+        row["url"] for row in db.execute(
+            "SELECT url FROM attachments "
+            " WHERE announcement_id = ? AND sha256 IS NOT NULL",
+            (announcement_id,),
+        )
+    }
+
+    for attachment in attachments:
+        if attachment.url in done:
+            continue
         summary["attachments_seen"] += 1
-        data = client.fetch(attachment.url)
+        try:
+            data = client.fetch(attachment.url)
+        except (BlockedError, RequestBudgetExceeded):
+            raise  # these end the run; the unhashed row survives for next time
+        except Exception as exc:
+            # One bad file must not abandon its siblings. The row stays unhashed,
+            # so the next poll picks it up.
+            summary["errors"] += 1
+            summary.note(f"download failed for {attachment.filename!r}: "
+                         f"{type(exc).__name__}: {exc}")
+            continue
         summary["downloaded"] += 1
 
         sha256 = hashlib.sha256(data).hexdigest()

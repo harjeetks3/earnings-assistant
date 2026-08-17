@@ -126,6 +126,87 @@ check("the warning survives the approve path",
       app._SOURCE_ONLY_WARNING_RE.match(warning[0]) is not None,
       "approve() recomputes warnings without the PDF text, so it must carry this forward")
 
+# --- a real but mis-keyed quote --------------------------------------------
+# Found by adversarial review: locate_quote only asked whether the sentence
+# exists. A genuine line of the document quoted for the wrong metric was
+# stamped llm_verified and printed under "As printed in the source".
+print("\na genuine quote that does not contain its figure is not accepted for it:")
+boilerplate = next(ln.strip() for ln in pdf_text.splitlines()
+                   if "today reported" in ln.lower() or "Analytics" in ln)
+check("the line really is in the document", boilerplate in pdf_text)
+rec = evidence_for({**BASE_ANALYSIS, "evidence": {"pbt_current": boilerplate}})["pbt_current"]
+check("not certified as the model's verified source",
+      rec["match_method"] != app.MATCH_LLM_VERIFIED, rec["match_method"])
+check("the unrelated sentence is not stored as the printed figure",
+      (rec["printed_form"] or "") != boilerplate, repr(rec["printed_form"]))
+
+print("\nboth ways a document states a figure count as a citation:")
+table_row = next(ln.strip() for ln in pdf_text.splitlines() if "48,200" in ln)
+rec = evidence_for({**BASE_ANALYSIS, "evidence": {"revenue_current": table_row}})["revenue_current"]
+check("the as-printed table form verifies", rec["match_method"] == app.MATCH_LLM_VERIFIED,
+      rec["match_method"])
+narrative = max((ln.strip() for ln in pdf_text.splitlines() if "48.2" in ln), key=len)
+rec = evidence_for({**BASE_ANALYSIS, "evidence": {"revenue_current": narrative}})["revenue_current"]
+check("the already-scaled narrative form verifies too",
+      rec["match_method"] == app.MATCH_LLM_VERIFIED, rec["match_method"])
+
+# --- coincidental digit matches --------------------------------------------
+print("\nthe deterministic fallback refuses a coincidental match:")
+# 6.9 appears in this document only as a growth percentage. Certifying that as
+# the source of a monetary figure would be a fabricated citation.
+rec = evidence_for({**BASE_ANALYSIS, "pbt_current": 0.0069, "evidence": {}})["pbt_current"]
+check("a percentage is not accepted as a figure's source",
+      rec["match_method"] == app.MATCH_UNVERIFIED, rec["match_method"])
+
+print("\nthe deterministic fallback cites the line with the right caption:")
+# Lindqvist's income statement reads "Gross profit 372 349 316 / Selling
+# expenses (121) (118) (110) / ... / Profit before tax 148 132 121". The value
+# 121 appears under two different captions, and taking the first match cited
+# selling expenses as the source of a profit-before-tax figure.
+LINDQVIST = os.path.join(BASE, "test_data", "02_golden_Lindqvist_Industrial_Q4_FY2025.pdf")
+lq_pages = app.extract_pdf_pages(LINDQVIST)
+lq_text = app.PAGE_SEPARATOR.join(lq_pages)
+lq = {
+    "currency": "SEK", "unit_raw": "SEK million",
+    "revenue_current": 1240.0, "pbt_current": 148.0,
+    "pbt_same_quarter_last_year": 121.0,
+    "evidence": {},
+}
+lq_records = {r["metric"]: r for r in app.build_evidence(lq, lq_text, lq_pages)}
+
+lq_flat = " ".join(lq_text.split())
+check("121 really does appear under two captions",
+      "Selling expenses (121)" in lq_flat and "Profit before tax 148 132 121" in lq_flat,
+      repr([s for s in lq_flat.split(" Cost")[:1]])[:80])
+rec = lq_records["pbt_same_quarter_last_year"]
+cited = lq_text[max(0, rec["char_start"] - 60):rec["char_end"]]
+check("it is cited to the profit-before-tax row",
+      "before tax" in cited.lower(), repr(cited[-70:]))
+check("not to selling expenses",
+      "selling expenses" not in cited.lower(), repr(cited[-70:]))
+
+rec = lq_records["revenue_current"]
+cited = lq_text[max(0, rec["char_start"] - 60):rec["char_end"]]
+check("revenue is cited to a revenue/net-sales line",
+      any(w in cited.lower() for w in ("net sales", "revenue", "turnover")),
+      repr(cited[-70:]))
+
+print("\nfigures from a previously approved entry are labelled, not cited:")
+records = {r["metric"]: r for r in app.build_evidence(
+    {**BASE_ANALYSIS, "evidence": {"revenue_previous_quarter": real_line}},
+    pdf_text, pages,
+    document_sourced={"revenue_current"})}
+rec = records["revenue_previous_quarter"]
+check("marked as carried from a prior entry",
+      rec["match_method"] == app.MATCH_PRIOR_ENTRY, rec["match_method"])
+check("no page citation into this document", rec["page_number"] is None)
+check("and it says where it came from",
+      "previously approved" in (rec["snippet"] or ""), repr(rec["snippet"]))
+check("document-sourced fields are still traced normally",
+      records["revenue_current"]["match_method"] in
+      (app.MATCH_LLM_VERIFIED, app.MATCH_DETERMINISTIC),
+      records["revenue_current"]["match_method"])
+
 # --- unusable model responses ----------------------------------------------
 # Asking for evidence quotes makes responses longer, so running into the
 # model's own output limit is more likely. A cut-off response must say so

@@ -113,9 +113,28 @@ of thing an LLM produces fluently and wrongly.
 
 | `match_method` | Meaning |
 |---|---|
-| `llm_verified` | The model's quote was found verbatim in the extracted text |
-| `deterministic` | No usable quote, so code located the figure's own printed form |
-| `unverified` | Neither worked — provenance is genuinely missing, and says so |
+| `llm_verified` | The model's quote was found verbatim **and contains the figure** |
+| `deterministic` | No usable quote, so code located the figure under the right caption |
+| `prior_entry` | The value came from a previously approved filing, not this document |
+| `unverified` | None worked — provenance is genuinely missing, and says so |
+
+Two rules earn their keep here, both from cases that actually occurred:
+
+- **A quote must contain its own figure.** Locating a sentence only proves the sentence exists. A
+  real but mis-keyed quote — boilerplate, another metric's row — was otherwise stamped verified and
+  printed under "As printed in the source". Either form counts: the table's `48,200` or the
+  narrative's `US$48.2 million`.
+- **A figure is matched under its caption, not by first occurrence.** `121` appears in the
+  Lindqvist fixture as both `Selling expenses (121)` and `Profit before tax 148 132 121`; the first
+  match cited selling expenses as the source of a profit figure. Note that appearing several times
+  is *not* ambiguity — a real figure shows up in the narrative, the statement and the MD&A — so
+  refusing multi-match figures is wrong and costs a third of all coverage. A different caption is
+  the thing to guard against.
+
+Comparison figures are the subtle case: packaging replaces them with values from previously
+approved filings, so citing a line of *this* PDF for them is a fabricated citation however real
+the quoted line is. Only fields packaging left as the model read them are traced; the rest are
+recorded as `prior_entry`.
 
 `locate_quote()` tries an exact match, then a whitespace-insensitive one, because PDF extraction
 routinely mangles spacing. It goes no looser than that: anything more permissive would start
@@ -193,6 +212,34 @@ Plain asserts, no runner, no API calls — run each directly with `python <file>
 `test_bursa_offline.py` and `test_poll_offline.py` replace `socket.socket` for the duration of
 the run and then assert nothing connected, so a regression that introduces a live request fails
 in the suite rather than in production.
+
+## Running it safely
+
+`python app.py` binds **127.0.0.1** with the debugger off. That matters more than it looks:
+**there is no authentication on any route.** Anything that can reach the port can
+`POST /pending/<id>/approve` — writing to the database of record with no human involved, which is
+the guarantee the whole tool exists to provide — or `POST /evaluate` repeatedly, at five paid API
+calls a time.
+
+`EARNINGS_BIND` exists for the deliberate case (behind a reverse proxy that authenticates) and
+warns when used. Do not expose this to a network you do not control without putting authentication
+in front of it.
+
+## Open findings, not yet fixed
+
+From the adversarial review of 2026-08-17. Real, verified, and bounded:
+
+- **The discovery queue re-offers approved filings.** `list_discovered` derives "extracted" from a
+  `pending_reviews` count, and approval deletes that row, so a finished filing reverts to
+  *Verified / Extract (uses API credit)*. No credit is actually spent — the duplicate check
+  returns 409 first — but the panel whose job is saying what still needs attention says the wrong
+  thing. Fix by reading `announcements.status`, which is already set to `extracted` and never read.
+- **`_TableParser` can raise `AttributeError` on malformed HTML** (a nested table, a `</td>` after
+  `</tr>`), which escapes `parse_html`'s caller and would kill a scheduled poll. Only reachable via
+  the opt-in `--html` fallback, which the shipped configuration does not use.
+- **Annual-results filings are not matched.** `looks_like_results()` deliberately ignores "Annual
+  Audited Accounts": it is a different document type from the quarterly report the extraction
+  prompt is tuned for.
 
 ## Known limitations
 

@@ -77,21 +77,59 @@ def upsert_attachment(db, announcement_id: int, attachment, *,
                       local_path: str | None = None,
                       verification_status: str = "pending",
                       verification_detail: str | None = None) -> tuple[int, bool]:
-    """Insert if new for this announcement. Identity is (announcement_id, sha256)
-    once hashed; before download, the URL stands in so a second poll does not
-    re-queue the same file."""
+    """Insert if new for this announcement, or complete a row already recorded.
+
+    The pipeline records each discovered file before downloading it, so that a
+    failure part-way through a multi-file announcement leaves a durable note of
+    what is still outstanding. That means this is called twice per attachment:
+    once with no hash, then again once the bytes are in hand. The second call
+    must COMPLETE the first row rather than insert a second one, or the
+    outstanding-work query would never drain.
+    """
     if sha256:
         existing = db.execute(
             "SELECT id FROM attachments WHERE announcement_id = ? AND sha256 = ?",
             (announcement_id, sha256),
         ).fetchone()
-    else:
-        existing = db.execute(
-            "SELECT id FROM attachments WHERE announcement_id = ? AND url = ? AND sha256 IS NULL",
+        if existing:
+            # The same document reached us under two URLs — announcements do
+            # link a file more than once. UNIQUE(announcement_id, sha256) means
+            # one row is the correct outcome, so drop the placeholder we made
+            # for the other URL. Leaving it would keep the announcement looking
+            # permanently unfinished and re-fetched on every poll.
+            db.execute(
+                "DELETE FROM attachments "
+                " WHERE announcement_id = ? AND url = ? AND sha256 IS NULL",
+                (announcement_id, attachment.url),
+            )
+            db.commit()
+            return existing["id"], False
+
+        # A row we created before downloading: fill it in.
+        placeholder = db.execute(
+            "SELECT id FROM attachments "
+            " WHERE announcement_id = ? AND url = ? AND sha256 IS NULL",
             (announcement_id, attachment.url),
         ).fetchone()
-    if existing:
-        return existing["id"], False
+        if placeholder:
+            db.execute(
+                """UPDATE attachments
+                      SET sha256 = ?, file_size = ?, local_path = ?,
+                          verification_status = ?, verification_detail = ?,
+                          downloaded_at = ?
+                    WHERE id = ?""",
+                (sha256, file_size, local_path, verification_status,
+                 verification_detail, _now(), placeholder["id"]),
+            )
+            db.commit()
+            return placeholder["id"], False
+    else:
+        existing = db.execute(
+            "SELECT id FROM attachments WHERE announcement_id = ? AND url = ?",
+            (announcement_id, attachment.url),
+        ).fetchone()
+        if existing:
+            return existing["id"], False
 
     cur = db.execute(
         """INSERT INTO attachments (

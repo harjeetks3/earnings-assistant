@@ -36,7 +36,7 @@ os.environ.pop("OPENAI_API_KEY", None)
 
 import app  # noqa: E402
 from bursa import pipeline  # noqa: E402
-from bursa.client import BursaClientError, FixtureClient  # noqa: E402
+from bursa.client import BlockedError, BursaClientError, FixtureClient  # noqa: E402
 from bursa.verify import REJECTED, VERIFIED, verify_pdf_bytes  # noqa: E402
 
 failures = []
@@ -186,8 +186,16 @@ with app.app.app_context():
     flaky = _FlakyClient(FIXTURES, listing="announcements_objects.json", sample_pdf=SAMPLE)
     sf = pipeline.run_poll(db, flaky, attachments_folder=app.ATTACHMENTS_FOLDER)
     check("announcements were recorded", sf["new_announcements"] == 2, str(sf["new_announcements"]))
-    check("but no attachment survived the failure",
-          db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0)
+    # The attachment row is written before the download precisely so a failure
+    # leaves a durable record of outstanding work. An unhashed row means
+    # "discovered, not yet downloaded".
+    check("the outstanding files are recorded, unhashed",
+          db.execute("SELECT COUNT(*) FROM attachments WHERE sha256 IS NULL"
+                     ).fetchone()[0] == 2,
+          str(db.execute("SELECT id, sha256 FROM attachments").fetchall()))
+    check("none is treated as downloaded",
+          db.execute("SELECT COUNT(*) FROM attachments WHERE sha256 IS NOT NULL"
+                     ).fetchone()[0] == 0)
     check("the failure was reported", sf["errors"] == 2, str(sf["messages"]))
 
     recovered = pipeline.run_poll(
@@ -206,6 +214,119 @@ with app.app.app_context():
         attachments_folder=app.ATTACHMENTS_FOLDER)
     check("once complete it goes back to downloading nothing",
           settled["downloaded"] == 0, str(settled["downloaded"]))
+
+    print("\na multi-PDF announcement whose second file fails is resumed, not stranded:")
+    # Adversarial review found the residual gap in the retry fix above: it only
+    # covered the all-or-nothing case. With two PDFs and one failure, "any row
+    # stored" read as handled and the missing file was never fetched again.
+    class _SecondPdfFails(FixtureClient):
+        DETAIL_TEMPLATE = (
+            "<html><body>"
+            "<a href='/misc/announcement/attachment/main_{n}.pdf'>main</a>"
+            "<a href='/misc/announcement/attachment/extra_{n}.pdf'>extra</a>"
+            "</body></html>"
+        )
+
+        # A genuinely different second document, so the two attachments are not
+        # collapsed by content hash and the resume is really tested.
+        OTHER = os.path.join(BASE, "test_data",
+                             "02_golden_Lindqvist_Industrial_Q4_FY2025.pdf")
+
+        def __init__(self, *a, break_extra=True, **kw):
+            super().__init__(*a, **kw)
+            self.break_extra = break_extra
+
+        def fetch(self, path_or_url, params=None, *, cache_name=None):
+            if "announcement_details" in path_or_url:
+                n = path_or_url.rsplit("=", 1)[-1]
+                return self.DETAIL_TEMPLATE.format(n=n).encode("utf-8")
+            if "extra_" in path_or_url:
+                if self.break_extra:
+                    raise BursaClientError("simulated timeout on the second file")
+                with open(self.OTHER, "rb") as f:
+                    return f.read()
+            return super().fetch(path_or_url, params, cache_name=cache_name)
+
+    db.execute("DELETE FROM attachments")
+    db.execute("DELETE FROM announcements")
+    db.commit()
+
+    p1 = pipeline.run_poll(db, _SecondPdfFails(FIXTURES, listing="announcements_live.json",
+                                               sample_pdf=SAMPLE),
+                           attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("the first file downloaded", p1["downloaded"] == 1, str(p1["downloaded"]))
+    check("the second failure was reported", p1["errors"] == 1, str(p1["messages"]))
+    check("but it did not abandon the first", p1["verified"] == 1, str(p1["verified"]))
+    check("the missing file is recorded as outstanding",
+          db.execute("SELECT COUNT(*) FROM attachments WHERE sha256 IS NULL"
+                     ).fetchone()[0] == 1)
+
+    p2 = pipeline.run_poll(db, _SecondPdfFails(FIXTURES, listing="announcements_live.json",
+                                               sample_pdf=SAMPLE, break_extra=False),
+                           attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("the next poll resumes the outstanding file", p2["downloaded"] == 1,
+          str(dict(p2)))
+    check("nothing is left outstanding",
+          db.execute("SELECT COUNT(*) FROM attachments WHERE sha256 IS NULL"
+                     ).fetchone()[0] == 0)
+    check("and no duplicate rows were created",
+          db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2,
+          str(db.execute("SELECT id, url, sha256 FROM attachments").fetchall()))
+
+    p3 = pipeline.run_poll(db, _SecondPdfFails(FIXTURES, listing="announcements_live.json",
+                                               sample_pdf=SAMPLE, break_extra=False),
+                           attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("once settled it stops fetching detail pages", p3["detail_pages_fetched"] == 0,
+          str(p3["detail_pages_fetched"]))
+
+    print("\n--since is normalised, never compared lexically as typed:")
+    # "2026-8-1" against ISO "2026-08-05" compares False at index 5 ('0' < '8'),
+    # so an unpadded date used to discard every announcement silently.
+    unpadded = pipeline.run_poll(db, FixtureClient(FIXTURES, listing="announcements_live.json",
+                                                   sample_pdf=SAMPLE),
+                                 attachments_folder=app.ATTACHMENTS_FOLDER,
+                                 since="2026-8-1")
+    check("an unpadded date is normalised, not applied as typed",
+          unpadded["errors"] == 0 and unpadded["parsed"] == 6, str(dict(unpadded)))
+    check("  and it still filters (all six are after 2026-08-01)",
+          unpadded["results_filings"] == 1, str(unpadded["results_filings"]))
+
+    future = pipeline.run_poll(db, FixtureClient(FIXTURES, listing="announcements_live.json",
+                                                 sample_pdf=SAMPLE),
+                               attachments_folder=app.ATTACHMENTS_FOLDER,
+                               since="2027-1-1")
+    check("a later boundary really does exclude them",
+          future["results_filings"] == 0, str(future["results_filings"]))
+
+    bad = pipeline.run_poll(db, FixtureClient(FIXTURES, sample_pdf=SAMPLE),
+                            attachments_folder=app.ATTACHMENTS_FOLDER,
+                            since="last week")
+    check("an uninterpretable value is refused, not silently applied",
+          bad["errors"] == 1 and any("--since" in m for m in bad["messages"]),
+          str(bad["messages"]))
+    good = pipeline.run_poll(db, FixtureClient(FIXTURES, listing="announcements_live.json",
+                                               sample_pdf=SAMPLE),
+                             attachments_folder=app.ATTACHMENTS_FOLDER,
+                             since="14 Aug 2026")
+    check("a human-formatted date is normalised and applied",
+          good["errors"] == 0 and good["parsed"] == 6, str(dict(good)))
+
+    print("\nbeing refused is flagged distinctly from an ordinary error:")
+    class _Blocked(FixtureClient):
+        def fetch(self, path_or_url, params=None, *, cache_name=None):
+            raise BlockedError("HTTP 429")
+
+    blocked = pipeline.run_poll(db, _Blocked(FIXTURES, sample_pdf=SAMPLE),
+                                attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("the block is recorded as such", blocked["blocked"] is True, str(dict(blocked)))
+    check("an ordinary run is not", p3["blocked"] is False, str(p3["blocked"]))
+
+    # Restore the objects-fixture state the next block asserts against; the
+    # multi-PDF and --since blocks above deliberately churned it.
+    db.execute("DELETE FROM attachments")
+    db.execute("DELETE FROM announcements")
+    db.commit()
+    pipeline.run_poll(db, new_client(), attachments_folder=app.ATTACHMENTS_FOLDER)
 
     print("\nthe HTML fallback produces the same result:")
     s3 = pipeline.run_poll(db, new_client("announcements_listing.html"),
@@ -238,6 +359,16 @@ with app.app.app_context():
     check("nothing downloaded", s6["downloaded"] == 0)
 
 # ============================ the human gate ================================
+# Reset to a known state: the blocks above deliberately left partial and
+# failed rows behind, and the queue assertions below are about exactly which
+# filings are offered for extraction.
+with app.app.app_context():
+    db = app.get_db()
+    db.execute("DELETE FROM attachments")
+    db.execute("DELETE FROM announcements")
+    db.commit()
+    pipeline.run_poll(db, new_client(), attachments_folder=app.ATTACHMENTS_FOLDER)
+
 print("\nthe discovery queue and human-triggered extract:")
 client = app.app.test_client()
 listed = client.get("/discovered").get_json()

@@ -44,7 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Run a single pass (the default; there is no loop mode "
                         "on purpose — use the OS scheduler)")
     p.add_argument("--since", metavar="YYYY-MM-DD",
-                   help="Ignore announcements dated before this")
+                   help="Ignore announcements dated before this. Must be a date; "
+                        "an uninterpretable value is refused rather than silently "
+                        "filtering everything out.")
     p.add_argument("--limit", type=int,
                    help="Process at most N matched announcements this run")
     p.add_argument("--dry-run", action="store_true",
@@ -134,8 +136,13 @@ def main(argv=None) -> int:
               f"Open the app and click Extract on the ones you want — "
               f"no API call is spent until you do.")
 
-    # Non-zero only when nothing could be done at all, so a scheduled run does
-    # not alarm on an ordinary quiet hour.
+    if summary["blocked"]:
+        print("\n[poll] Bursa refused this run. Reduce the polling frequency and "
+              "try later; this exits non-zero so a scheduler surfaces it.")
+        return 2
+
+    # Otherwise non-zero only when nothing could be done at all, so a scheduled
+    # run does not alarm on an ordinary quiet hour.
     return 1 if summary["errors"] and not summary["parsed"] else 0
 
 
