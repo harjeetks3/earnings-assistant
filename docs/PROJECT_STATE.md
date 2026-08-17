@@ -229,17 +229,35 @@ in front of it.
 
 From the adversarial review of 2026-08-17. Real, verified, and bounded:
 
-- **The discovery queue re-offers approved filings.** `list_discovered` derives "extracted" from a
-  `pending_reviews` count, and approval deletes that row, so a finished filing reverts to
-  *Verified / Extract (uses API credit)*. No credit is actually spent — the duplicate check
-  returns 409 first — but the panel whose job is saying what still needs attention says the wrong
-  thing. Fix by reading `announcements.status`, which is already set to `extracted` and never read.
-- **`_TableParser` can raise `AttributeError` on malformed HTML** (a nested table, a `</td>` after
-  `</tr>`), which escapes `parse_html`'s caller and would kill a scheduled poll. Only reachable via
-  the opt-in `--html` fallback, which the shipped configuration does not use.
 - **Annual-results filings are not matched.** `looks_like_results()` deliberately ignores "Annual
   Audited Accounts": it is a different document type from the quarterly report the extraction
   prompt is tuned for.
+
+### Closed since that review
+
+- **The discovery queue no longer re-offers approved filings.** `list_discovered` derived
+  "extracted" from a `pending_reviews` count, and approval deletes that row, so a finished filing
+  reverted to *Verified / Extract (uses API credit)*. No credit was ever spent — the duplicate
+  check returns 409 first — but the panel whose job is saying what still needs attention said the
+  opposite. It now also reads `announcements.status`, which is set to `extracted` when the button
+  is pressed and survives the handover, and exposes `in_pending` so the panel can distinguish
+  "awaiting review" from "already done". Both columns are popped unconditionally: short-circuiting
+  the check would have leaked the raw column into the JSON.
+- **`_TableParser` no longer raises `AttributeError` on malformed HTML.** An unclosed `<td>` left a
+  cell open past its `</tr>`; the next `</td>` then closed that cell into a row that no longer
+  existed. Closing a cell now checks its row is still open, `</tr>` keeps whatever an unclosed cell
+  collected rather than discarding it, and `parse_html()` converts any residual feed error into
+  `ParserError` — the type the pipeline already handles by noting the run and moving on, instead of
+  an unhandled crash that would take a scheduled poll down.
+- **Approval survives a draft report that cannot be deleted.** Writing the test above surfaced this:
+  `approve_pending()` removed the draft PDF *after* committing the record of account but *before*
+  deleting the pending row, unguarded. On Windows an open handle makes `os.remove` raise
+  `PermissionError`, which returned a 500 for an approval that had in fact succeeded and left the
+  filing both approved and still pending — where a second approval would have written a duplicate
+  record of account. The cleanup is now best-effort and logs, like `record_review_event()`.
+
+Covered by `test_poll_offline.py` (queue state across approval, including the locked-draft path)
+and `test_bursa_offline.py` (stray `</td>`, nested table, well-formed listing unchanged).
 
 ## Known limitations
 

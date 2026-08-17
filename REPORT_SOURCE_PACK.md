@@ -2,7 +2,7 @@
 
 - The current system is a Python Flask web app for the "Bursa Earnings Brief Assistant", a human-in-the-loop earnings PDF review tool for journalists. It is not an autonomous publishing bot.
 - The frontend is a single-page HTML/CSS/JavaScript interface in `templates/index.html` with drag-and-drop PDF upload, pending review, approved reports, and evaluation harness panels.
-- PDF text and metadata are extracted with `pypdf`. Text is read page by page with `page.extract_text()` and then joined into one text block; page-level evidence is not preserved.
+- PDF text and metadata are extracted with `pypdf`. Text is read page by page with `page.extract_text()` and joined into one text block, but the page boundaries are no longer lost: `extract_pdf_pages()` keeps the per-page list and `page_for_offset()` maps a character offset in the joined text back to its page number, which is what makes page-level evidence possible.
 - LLM extraction is implemented directly in `app.py` through `openai.OpenAI().chat.completions.create(...)`. The actual API call uses `model="gpt-5.4-mini"`, `temperature=0`, and JSON mode via `response_format={"type": "json_object"}`.
 - The LLM returns a JSON object with company, quarter, fiscal year, currency, unit, revenue, PBT, commentary, outlook, and confidence fields. There is no true strict JSON Schema response contract; Pydantic and rule checks validate after JSON generation.
 - Validation uses a Pydantic model plus deterministic rules for fiscal quarter, fiscal year, date format/year consistency, currency format, negative revenue, PBT greater than revenue, confidence range/low confidence, and all-null financial extraction.
@@ -133,9 +133,9 @@ Routes:
 - Library: `pypdf`.
 - Metadata extraction: `pypdf.PdfReader(...).metadata` plus `len(reader.pages)`.
 - Text extraction: `"\n\n".join(page.extract_text() or "" for page in reader.pages)`.
-- Page-level status: extraction is performed page by page, but the final prompt receives one joined string. The app does not keep page numbers, evidence snippets, bounding boxes, or citations.
+- Page-level status: the final prompt still receives one joined string, but the page list is retained alongside it. The app records page numbers, evidence snippets and the figure as printed in the source; it does not record bounding boxes.
 - OCR status: no OCR. Scanned/image-only PDFs may yield empty text and then rely on validation warnings or analysis errors.
-- Limitations: table structure can be lost, footnotes and columns can be reordered by text extraction, page provenance is unavailable, and unit conversion is left to the LLM prompt rather than deterministic parsing.
+- Limitations: table structure can be lost and footnotes and columns can be reordered by text extraction. Unit conversion is still performed by the model rather than by deterministic parsing, but `_audit_unit_scale()` checks the result against the figures printed in the document and corrects a systematic scale error when the source confirms it.
 
 ## Database
 
@@ -192,7 +192,7 @@ Implemented validation rules:
 
 Validation gaps:
 
-- No true page-level evidence/snippet check.
+- `llm_verified` coverage is not instrumented. Evidence is recorded and each quote is confirmed, but the stored evaluation JSON does not capture how often the model's own quote verified rather than degrading to a deterministic match, so that rate cannot be quoted from any run.
 - No OCR fallback.
 - No deterministic RM/unit conversion outside the LLM. The prompt instructs the model to normalize monetary values.
 - No vector database and no true RAG system.
@@ -425,9 +425,16 @@ Suggested capture procedure:
 
 # 11. Future Work
 
-- Official Bursa RSS/announcement monitoring.
-- Real Bursa company watchlist.
-- Page-level evidence index with snippets and source page references.
+Three items listed here originally have since been built, and a report that
+presents them as future work understates the system: Bursa announcement
+monitoring (the `bursa/` package and `poll_bursa.py`, working off the site's
+announcements endpoint rather than RSS), the company watchlist (`watchlist.json`,
+loaded on startup by `seed_companies_from_file()`), and the page-level evidence
+index (`evidence` rows carrying a page number and the printed form, surfaced as
+the Source Traceability table in the review report).
+
+Genuinely still outstanding:
+
 - OCR fallback for scanned/image-only PDFs.
 - PostgreSQL migration for multi-user or deployed use.
 - More robust deterministic unit normalization, especially RM/thousands/millions/billions and currency-symbol ambiguity.
@@ -464,14 +471,14 @@ Page 4:
 
 - Example outputs: upload UI, pending table, draft review PDF, approved table, evaluation results.
 - Lessons learned: LLM extraction needs validation, financial PDFs are ambiguous, synthetic tests reveal failures, human approval protects data quality.
-- Future work: Bursa integration, OCR, page evidence, deterministic unit normalization, PostgreSQL, more fields, more tests, prompt-injection hardening.
+- Future work: OCR for scanned filings, deterministic unit normalization, PostgreSQL, more fields, more tests, prompt-injection hardening, and direct investor-relations page monitoring. Do NOT list page-level evidence or Bursa monitoring here — both are implemented.
 - Accuracy caveat: document-grounded extraction, not full RAG or autonomous publishing.
 
 # 13. Critical Accuracy Notes for the Report Writer
 
 - Do not call this a full RAG system. It is document-grounded PDF extraction using the uploaded PDF text in the prompt.
 - Do not claim autonomous publishing. The app is explicitly human-in-the-loop and review-gated.
-- Do not claim page-level evidence snippets or citations. The code joins extracted text and does not preserve page-level evidence.
+- Page-level evidence and citations ARE implemented, and the report should say so: every monetary figure with a value gets an `evidence` row carrying a page number and the text as printed, and the draft report renders a Source Traceability table. What must not be claimed is that the model's citations are taken on trust — the model proposes a quote, code confirms it contains the figure it is cited for, and a quote that cannot be confirmed degrades to a deterministic caption match and then to `unverified` rather than being dropped.
 - Do not claim OCR support. `pypdf` text extraction only is implemented.
 - Do not claim strict JSON Schema constrained outputs. The app uses JSON mode plus post-generation Pydantic/rule validation.
 - Be precise about unit normalization. The conversion to millions is still instructed in the prompt and performed by the LLM, but `_audit_unit_scale()` now checks the result against the figures printed in the PDF and rescales all six monetary fields when a different factor matches the source and the model's own does not. It is a verification layer, not deterministic parsing: documents whose figures cannot be located in the extracted text fall through unchanged with a warning.

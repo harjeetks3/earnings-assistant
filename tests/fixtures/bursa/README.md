@@ -8,6 +8,7 @@ default test suite makes **no live requests** — these files are the only input
 | File | Source |
 |---|---|
 | `announcements_live.json` | **REAL.** Captured 2026-08-16 from the site's own request. Truncated to 6 of 20 rows for size; untouched otherwise. |
+| `announcements_results_live.json` | **REAL.** The same endpoint with `cat=FA,FRCO` — the site's own *Financial Results* filter. Also truncated to 6 rows. |
 | `announcements_empty_live.json` | **REAL.** The same endpoint with no parameters — an empty result set. |
 | `robots.txt` | **REAL.** Captured 2026-08-16. |
 | `announcements_objects.json` | **Synthetic.** Records-as-objects shape, the only fixture with attachments on the listing. |
@@ -46,11 +47,20 @@ Four things this corrected in the parser, each of which had been guessed wrong:
 - **The listing carries no attachments at all.** The PDF is on the announcement's
   own page, so the pipeline fetches that page for matched announcements only.
 
+## The category filter, also confirmed
+
+`cat=FA,FRCO` is the value the site's own *Financial Results* control sends,
+captured as `announcements_results_live.json`. It takes the listing from
+2,087,762 announcements to 1,081, so a poll reads a shortlist rather than a
+haystack. It is the default in `poll_bursa.py` (`DEFAULT_CATEGORY`), and
+`--category ""` disables it.
+
+It is **not sufficient on its own** — it still admits filings like *"Change in
+Financial Year End"* — so `looks_like_results()` remains the second gate,
+matching on the title.
+
 ## Still unverified
 
-- **The `cat=` value for financial results.** Left empty, so the listing returns
-  every announcement type and the results filter runs client-side on the title.
-  Supplying it would cut the volume considerably.
 - **Whether `dt_ht` / `dt_lt` are date-from and date-to**, and in which order.
   `--since` therefore filters client-side.
 - **The HTML fallback layout.** The rendered announcements page returns 403 to
