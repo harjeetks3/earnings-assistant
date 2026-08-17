@@ -7,6 +7,7 @@ fabricated quote — a citation is exactly the kind of thing an LLM produces
 fluently and wrongly, so a quote that is not in the document must be recorded
 as unverified rather than accepted.
 """
+import json
 import os
 import shutil
 import sys
@@ -350,6 +351,213 @@ with app.app.app_context():
                      (approved["id"],)).fetchone()[0] == 0)
 
 shutil.rmtree(ws, ignore_errors=True)
+
+
+def fresh_workspace():
+    """A throwaway database and folder tree, with app pointed at them.
+
+    Each section below needs a database holding no approved entries, so that
+    "pdf_metadata is still empty" means the gate held rather than that this
+    section simply had not got round to approving anything yet.
+    """
+    path = tempfile.mkdtemp(prefix="evidence_test_")
+    app.UPLOAD_FOLDER = os.path.join(path, "uploads")
+    app.ATTACHMENTS_FOLDER = os.path.join(path, "attachments")
+    app.REPORTS_FOLDER = os.path.join(path, "reports")
+    app.DB_PATH = os.path.join(path, "t.db")
+    app.WATCHLIST_PATH = os.path.join(path, "absent.json")
+    for folder in (app.UPLOAD_FOLDER, app.ATTACHMENTS_FOLDER, app.REPORTS_FOLDER):
+        os.makedirs(folder, exist_ok=True)
+    app.init_db()
+    return path
+
+
+def approved_count(conn):
+    return conn.execute("SELECT COUNT(*) FROM pdf_metadata").fetchone()[0]
+
+
+def pending_count(conn, pending_id):
+    return conn.execute("SELECT COUNT(*) FROM pending_reviews WHERE id = ?",
+                        (pending_id,)).fetchone()[0]
+
+
+# --- the review gate, asserted in its failing direction ---------------------
+# Every other approval in this suite downloads the report first, so the gate is
+# only ever exercised where it lets the request through. That makes "nothing
+# reached pdf_metadata" a statement about this run rather than about the rule:
+# deleting the downloaded_at check would leave every one of those checks
+# passing. These assert the refusal itself.
+print("\nno figure reaches the record of account before a human reads the draft:")
+ws = fresh_workspace()
+with app.app.app_context():
+    db = app.get_db()
+    pending_id = app.ingest_pdf_bytes(db, open(SAMPLE, "rb").read(), "gate.pdf")["id"]
+    client = app.app.test_client()
+
+    def is_armed():
+        # Tolerates the row having vanished: if the gate ever stops holding, the
+        # approval goes through and deletes it, and that must surface as a failed
+        # check rather than as a crash that hides the rest of the section.
+        r = db.execute("SELECT downloaded_at FROM pending_reviews WHERE id = ?",
+                       (pending_id,)).fetchone()
+        return bool(r and r["downloaded_at"])
+
+    resp = client.post(f"/pending/{pending_id}/approve")
+    body = resp.get_json() or {}
+    check("approving an undownloaded review is refused", resp.status_code == 400,
+          f"{resp.status_code} {str(body)[:120]}")
+    check("  and the refusal names the reason", body.get("error") == "not_reviewed", str(body)[:120])
+    check("  nothing was written to the record of account", approved_count(db) == 0)
+    check("  and the review is still there to be reviewed",
+          pending_count(db, pending_id) == 1)
+
+    # The same gate guards the reject path, which spends money on a rerun.
+    resp = client.post(f"/pending/{pending_id}/reject", json={})
+    body = resp.get_json() or {}
+    check("failing an undownloaded review is refused too", resp.status_code == 400,
+          f"{resp.status_code} {str(body)[:120]}")
+    check("  for the same stated reason", body.get("error") == "not_reviewed", str(body)[:120])
+
+    print("\nand a rerun re-arms the gate, so the NEW draft must be read as well:")
+    client.get(f"/pending/{pending_id}/report")
+    check("downloading the draft arms the approval", is_armed())
+
+    resp = client.post(f"/pending/{pending_id}/reject", json={"instructions": "check the tax line"})
+    check("the rerun ran", resp.status_code == 200, f"{resp.status_code} {str(resp.get_json())[:120]}")
+    check("  and it cleared the download", not is_armed(),
+          "the figures changed, so the draft the human read no longer describes them")
+
+    resp = client.post(f"/pending/{pending_id}/approve")
+    check("approving the unread rerun is refused", resp.status_code == 400, str(resp.status_code))
+    check("  with nothing in the record of account", approved_count(db) == 0)
+
+    client.get(f"/pending/{pending_id}/report")
+    resp = client.post(f"/pending/{pending_id}/approve")
+    check("approving after reading the new draft succeeds", resp.status_code == 201,
+          f"{resp.status_code} {str(resp.get_json())[:120]}")
+    check("  and writes exactly one record of account", approved_count(db) == 1)
+shutil.rmtree(ws, ignore_errors=True)
+
+# --- a draft that will not delete ------------------------------------------
+# The bug _remove_quietly exists to fix: approval committed the record of
+# account, then the unlink of the draft raised, turning a successful approval
+# into a 500 and skipping the pending-row cleanup underneath it. The filing was
+# then approved AND still queued, and approving it again wrote a second record.
+# The pending row is now deleted inside the approval transaction, so the second
+# half of that cannot recur — but the false 500 still can, and reporting failure
+# for a filing that did reach the record of account is what makes a reviewer
+# approve it twice. Both halves are asserted below.
+print("\na draft that cannot be deleted does not undo the approval it follows:")
+ws = fresh_workspace()
+with app.app.app_context():
+    db = app.get_db()
+    pending_id = app.ingest_pdf_bytes(db, open(SAMPLE, "rb").read(), "locked.pdf")["id"]
+    client = app.app.test_client()
+    client.get(f"/pending/{pending_id}/report")
+
+    # What happens in the field is Windows refusing to unlink a draft whose
+    # reader has not let go of it. Holding a real lock is neither portable nor
+    # reliable to arrange, so point the row at something os.remove can never
+    # remove on any platform — a non-empty directory. The route and the helper
+    # it calls are untouched, and os.remove genuinely raises.
+    locked = os.path.join(app.REPORTS_FOLDER, f"pending_{pending_id}_held_open.pdf")
+    os.makedirs(locked, exist_ok=True)
+    with open(os.path.join(locked, "reader.lock"), "w", encoding="utf-8") as f:
+        f.write("a reader still has this open")
+    db.execute("UPDATE pending_reviews SET report_path = ? WHERE id = ?", (locked, pending_id))
+    db.commit()
+
+    try:
+        os.remove(locked)
+        raised = None
+    except OSError as exc:
+        raised = exc
+    check("the draft really is undeletable", raised is not None,
+          "the fixture must genuinely make os.remove fail, or this proves nothing")
+    try:
+        quietly = app._remove_quietly(locked, "draft report")
+    except OSError as exc:
+        quietly = f"raised {type(exc).__name__}"
+    check("  and the helper reports that instead of raising", quietly is False, repr(quietly))
+
+    resp = client.post(f"/pending/{pending_id}/approve")
+    check("the approval still reports success", resp.status_code == 201,
+          f"{resp.status_code} {str(resp.get_json())[:120]}")
+    check("  the record of account was written exactly once", approved_count(db) == 1)
+    check("  the pending row was cleaned up", pending_count(db, pending_id) == 0)
+    check("  so the filing cannot be approved a second time",
+          client.post(f"/pending/{pending_id}/approve").status_code == 404)
+    check("  and the undeletable draft is still on disk, so the unlink did fail",
+          os.path.isdir(locked))
+shutil.rmtree(ws, ignore_errors=True)
+
+# --- what the evaluation harness records about traceability -----------------
+# verified=1 covers both a quote the model got right and a figure the code found
+# unaided, so the coverage line alone cannot say which happened. _evaluate_case
+# is called directly with the model stubbed: run_evaluation() sends the test
+# PDFs to OpenAI and costs money, and none of this needs a real call.
+print("\nthe evaluation harness records HOW each figure was traced, not just that it was:")
+EVAL_CASE = {
+    "category": "golden", "metadata": {}, "pages": None,
+    "expected_extraction": {}, "expected_qoq_yoy": {},
+    "expected_validation_warnings": [], "conditional_validation_warnings": [],
+}
+ALL_METHODS = sorted([app.MATCH_LLM_VERIFIED, app.MATCH_DETERMINISTIC,
+                      app.MATCH_UNVERIFIED, app.MATCH_PRIOR_ENTRY])
+
+
+def eval_checks(evidence_block):
+    """Run one case through the harness with the model returning `evidence_block`.
+
+    The breakdown row is returned separately, standing in an empty one if the
+    harness stopped recording it — that absence is the regression, and it should
+    show up as failed checks rather than as a crash that hides the rest.
+    """
+    app.analyse_earnings = lambda text, **kw: {
+        "company_name": "NorthPeak Analytics, Inc.", "quarter_end_date": "2026-03-31",
+        "fiscal_quarter": "Q1", "fiscal_year": 2026, "confidence_score": 0.95,
+        "management_commentary": "s", "outlook_summary": "s",
+        **BASE_ANALYSIS,
+        "evidence": evidence_block,
+    }
+    case = app._evaluate_case(os.path.basename(SAMPLE), EVAL_CASE)
+    by_field = {c["field"]: c for c in case["checks"]}
+    return by_field, by_field.get("evidence_match_methods", {"actual": {}})
+
+
+checks, row = eval_checks({"revenue_current": real_line})
+check("the harness records a match_method breakdown", "evidence_match_methods" in checks,
+      str(sorted(checks)))
+check("it is informational and can never fail a case",
+      row.get("info_only") is True and row.get("passed") is True, str(row))
+check("every method has a key, so a zero is not a missing key",
+      sorted(row["actual"]) == ALL_METHODS, str(sorted(row["actual"])))
+quoted = row["actual"]
+check("the model's own quote is counted as llm_verified",
+      quoted.get(app.MATCH_LLM_VERIFIED, 0) >= 1, str(quoted))
+check("the figures it did not quote are counted separately as deterministic",
+      quoted.get(app.MATCH_DETERMINISTIC, 0) >= 1, str(quoted))
+# This path calls build_evidence without document_sourced, so prior_entry is
+# structurally zero here — a fixed shape, not a measurement of anything.
+check("prior_entry is present but cannot arise on this path",
+      quoted.get(app.MATCH_PRIOR_ENTRY) == 0, str(quoted))
+check("it agrees with the coverage line it sits beside",
+      checks["evidence_coverage"]["actual"].startswith(
+          f"{quoted.get(app.MATCH_LLM_VERIFIED, 0) + quoted.get(app.MATCH_DETERMINISTIC, 0)}/"),
+      checks["evidence_coverage"]["actual"])
+check("and it survives the JSON round-trip run_evaluation writes it through",
+      json.loads(json.dumps(row)) == row, str(row)[:120])
+
+# The same document with no quotes at all. If the two methods were not genuinely
+# distinguished, this number could not move.
+unquoted = eval_checks({})[1]["actual"]
+check("with no quote, nothing is credited to the model",
+      unquoted.get(app.MATCH_LLM_VERIFIED) == 0, str(unquoted))
+check("  the figure moves into the deterministic count instead",
+      unquoted.get(app.MATCH_DETERMINISTIC, 0) > quoted.get(app.MATCH_DETERMINISTIC, 0),
+      f"{unquoted} vs {quoted}")
+check("  and no figure is lost or double-counted between the two",
+      sum(unquoted.values()) == sum(quoted.values()) > 0, f"{unquoted} vs {quoted}")
 
 print()
 if failures:

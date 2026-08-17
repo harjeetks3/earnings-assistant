@@ -345,9 +345,14 @@ from audit import (  # noqa: E402,F401
 )
 
 
-# Corporate forms, filing boilerplate and generic report vocabulary — none of it
-# identifies a company, so it is ignored when comparing a PDF's metadata against
-# the company name the model extracted from the document body.
+# ---------- Shared PDF verification ----------
+# The monitor's pre-flight check on a downloaded file (bursa/pipeline.py), reused
+# on the ingest path so an uploaded file and a downloaded one have to satisfy the
+# same definition of "a usable filing". bursa/ imports nothing from here, so this
+# direction of the dependency is the safe one.
+from bursa.verify import VERIFIED, verify_pdf_bytes  # noqa: E402
+
+
 # ---------- Evidence: model proposes, code confirms ----------
 #
 # "Every financial figure must remain source-traceable" cannot rest on the model
@@ -1116,6 +1121,20 @@ def _evaluate_case(filename: str, expected: dict) -> dict:
     record("evidence_coverage", True,
            f"{traced}/{len(evidence_records)} figures traced to the document",
            "informational", info_only=True)
+    # The count above cannot answer the question the traceability claim rests on:
+    # LLM_VERIFIED and DETERMINISTIC both set verified=1, so it does not say how
+    # often the model's OWN quote checked out versus the code finding the figure
+    # unaided. That is only observable on a live run — the stored result carries
+    # no model output to replay — so record it while the run is happening.
+    # Every method is listed, including ones this path cannot produce, so the
+    # shape is fixed and a zero is distinguishable from a key that was not
+    # written when the counts are summed across cases.
+    by_method = dict.fromkeys(
+        (MATCH_LLM_VERIFIED, MATCH_DETERMINISTIC, MATCH_UNVERIFIED, MATCH_PRIOR_ENTRY), 0)
+    for r in evidence_records:
+        method = r["match_method"]
+        by_method[method] = by_method.get(method, 0) + 1
+    record("evidence_match_methods", True, by_method, "informational", info_only=True)
     scale_warnings += evidence_summary_warning(evidence_records)
 
     for field, expected_val in expected.get("expected_extraction", {}).items():
@@ -1198,6 +1217,11 @@ def run_evaluation() -> dict:
 
     return result
 
+
+# ---------- Review report assembly ----------
+#
+# Turning a stored row — approved or still pending — into the PDF a human reads,
+# including the evidence that makes each figure traceable back to its document.
 
 def load_evidence(db, *, pdf_metadata_id: int | None = None,
                   pending_review_id: int | None = None) -> list[dict]:
@@ -1465,9 +1489,18 @@ def record_review_event(db, subject_type: str, subject_id: int, event: str,
 
 
 def seed_companies_from_file(db, path: str | None = None) -> int:
-    """Load watchlist.json into `companies`. Insert-only: an existing row is left
-    alone, so edits made through the UI are never clobbered by a restart. Returns
-    the number of companies actually inserted.
+    """Load watchlist.json into `companies`, reconciling the rows it already has.
+
+    The file is the operator's watchlist, so editing it has to mean something.
+    Seeding used to be insert-only, which made that false: setting
+    `"is_active": false` on a company already in the database changed nothing and
+    the monitor kept polling it. `is_active`, `name` and `short_name` are
+    therefore brought into line with the file for every stock code it lists.
+    Returns the number of companies actually inserted.
+
+    Nothing is ever deleted. A company dropped from the file still owns the
+    announcements discovered for it, and removing the row would orphan them — so
+    it is reported and left alone. Deactivating is how you stop polling one.
 
     A missing or malformed file is not fatal — monitoring is optional, and the
     review tool must still start without it."""
@@ -1486,6 +1519,8 @@ def seed_companies_from_file(db, path: str | None = None) -> int:
 
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     inserted = 0
+    listed = set()
+    changes = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -1494,18 +1529,56 @@ def seed_companies_from_file(db, path: str | None = None) -> int:
         if not stock_code or not name:
             print(f"[WARNING] Watchlist entry missing stock_code or name — skipping: {entry!r}")
             continue
+        listed.add(stock_code)
+        wanted = {
+            "name": name,
+            "short_name": entry.get("short_name"),
+            "is_active": 1 if entry.get("is_active", True) else 0,
+        }
         cur = db.execute(
             """INSERT OR IGNORE INTO companies
                    (stock_code, name, short_name, is_active, source, notes, added_at)
                VALUES (?,?,?,?,'seed',?,?)""",
             (
-                stock_code, name, entry.get("short_name"),
-                1 if entry.get("is_active", True) else 0,
+                stock_code, wanted["name"], wanted["short_name"], wanted["is_active"],
                 entry.get("notes"), now,
             ),
         )
-        inserted += cur.rowcount or 0
+        if cur.rowcount:
+            inserted += 1
+            continue
+        # Already known: bring it into line with the file rather than ignoring it.
+        existing = db.execute(
+            "SELECT id, name, short_name, is_active FROM companies WHERE stock_code = ?",
+            (stock_code,),
+        ).fetchone()
+        if not existing:
+            continue
+        differing = {f: v for f, v in wanted.items() if existing[f] != v}
+        if not differing:
+            continue
+        db.execute(
+            "UPDATE companies SET name = ?, short_name = ?, is_active = ? WHERE id = ?",
+            (wanted["name"], wanted["short_name"], wanted["is_active"], existing["id"]),
+        )
+        changes.append(f"{stock_code} " + ", ".join(
+            f"{field} {existing[field]!r} -> {value!r}"
+            for field, value in differing.items()))
     db.commit()
+
+    if changes:
+        print(f"[DB] Reconciled {len(changes)} company/companies with "
+              f"{os.path.basename(path)}: " + "; ".join(changes))
+    # Reported, never deleted: the row is what an already-discovered announcement
+    # points at as its issuer.
+    dropped = [r["stock_code"] for r in
+               db.execute("SELECT stock_code FROM companies WHERE source = 'seed'")
+               if r["stock_code"] not in listed]
+    if dropped:
+        print(f"[DB] {len(dropped)} seeded company/companies are no longer listed in "
+              f"{os.path.basename(path)} — left in place so their announcements keep "
+              f"an issuer; deactivate rather than delete to stop polling: "
+              f"{', '.join(dropped)}")
     return inserted
 
 
@@ -1591,13 +1664,33 @@ def init_db():
         )
         _add_missing_columns(db, "pending_reviews", PENDING_REVIEW_COLUMNS)
 
+        # One record of account per document. approve_pending() serialises
+        # approvals, but two simultaneous uploads of the same PDF can both pass
+        # the check-then-insert duplicate test in ingest_pdf_bytes() and stage
+        # two pending reviews; this is what stops both becoming records.
+        # Partial, because rows that predate the sha256 column migrated in with
+        # DEFAULT '' and there can legitimately be many of those.
+        try:
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pdf_metadata_sha256 "
+                       "ON pdf_metadata(sha256) WHERE sha256 <> ''")
+            db.commit()
+        except sqlite3.DatabaseError as exc:
+            # A database that already holds two rows for one document — exactly
+            # what this index prevents — cannot build it. Say so and carry on:
+            # approval is still serialised without it.
+            print(f"[DB] Could not create unique index on pdf_metadata.sha256: {exc}")
+
         seeded = seed_companies_from_file(db)
         if seeded:
             print(f"[DB] Seeded {seeded} company/companies from {os.path.basename(WATCHLIST_PATH)}")
 
-        refreshed = _refresh_approved_comparisons(db)
-        if refreshed:
-            print(f"[DB] Refreshed comparison fields for {refreshed} approved report(s)")
+        # The comparison backfill deliberately does NOT run here. init_db() is
+        # called on every scheduled poll (poll_bursa.py), and
+        # _refresh_approved_comparisons() issues UPDATEs against pdf_metadata —
+        # the record of account, which no automated path may write to. Approving
+        # a review and deleting an approved entry are the only two events that
+        # change what a comparison resolves to, and both refresh there, with a
+        # person present.
 
         db.close()
 
@@ -1628,6 +1721,7 @@ def ingest_pdf_bytes(
 
     Returns a plain dict, not an HTTP response, so callers map it themselves:
       {"status": "duplicate", "scope": "approved"|"pending", "existing_id": N, ...}
+      {"status": "rejected", "reason": "..."}
       {"status": "pending_review", "id": N, ...}
     """
     file_size = len(file_bytes)
@@ -1659,6 +1753,18 @@ def ingest_pdf_bytes(
             "existing_filename": pending_existing["filename"],
         }
 
+    # Nothing reaches disk until the bytes are known to be a usable filing.
+    # POST /upload gates on the file EXTENSION only, so an HTML page renamed
+    # .pdf was written to uploads/ and then blew up inside pypdf — an unhandled
+    # 500, with the bytes left behind. This is the same check the monitor already
+    # applies to a download (bursa/pipeline.py), reused rather than restated, so
+    # the two entry points cannot disagree about what a filing is. It also covers
+    # the discovered path, where the file on disk may no longer be the file that
+    # was verified when it arrived.
+    status, detail = verify_pdf_bytes(file_bytes)
+    if status != VERIFIED:
+        return {"status": "rejected", "reason": detail}
+
     # Save file — unless it is already on disk. The monitor has already written
     # the PDF to attachments/, so writing it again would leave two identical
     # copies with the second one timestamp-suffixed.
@@ -1676,13 +1782,22 @@ def ingest_pdf_bytes(
         with open(save_path, "wb") as f:
             f.write(file_bytes)
 
-    # Basic PDF metadata
-    meta = get_pdf_metadata(save_path)
+    # Basic PDF metadata. verify_pdf_bytes() opened these same bytes a moment
+    # ago, so a failure here means what landed on disk is not what was checked.
+    # Take back the copy we wrote rather than orphaning it — but never a file we
+    # were handed: existing_path is the monitor's download, not ours to delete.
+    try:
+        meta = get_pdf_metadata(save_path)
+        pages = extract_pdf_pages(save_path)
+    except Exception as exc:
+        if save_path != existing_path:
+            _remove_quietly(save_path, "unreadable upload")
+        return {"status": "rejected",
+                "reason": f"The saved PDF could not be read: {type(exc).__name__}: {exc}"}
     uploaded_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
     # GPT-5.4-mini earnings analysis
     print(f"\n[INFO] Starting GPT-5.4-mini analysis for: {safe_name}")
-    pages = extract_pdf_pages(save_path)
     pdf_text = PAGE_SEPARATOR.join(pages)
     extracted_data, evidence_records = _run_llm_pipeline(
         pdf_text, db, pdf_meta=meta, pages=pages)
@@ -1798,6 +1913,42 @@ def _remove_quietly(path: str | None, what: str = "file") -> bool:
         return False
 
 
+def _remove_source_pdf(db, row, subject: str) -> None:
+    """Delete the stored PDF a record was made from — but only if the file on
+    disk really is that PDF.
+
+    A basename does not identify a file here: uploads/ and attachments/
+    de-collide only within themselves, so a monitored filing and an unrelated
+    manual upload can share one. Resolve by provenance, then confirm the bytes
+    against the hash the record was made from. Anything that cannot be confirmed
+    stays on disk — a stray PDF is a housekeeping annoyance, an unrelated
+    document deleted by name is unrecoverable.
+
+    `row` needs filename, sha256 and source_attachment_id; pending_reviews and
+    pdf_metadata both carry all three.
+    """
+    path = locate_pending_file(row["filename"], db, row["source_attachment_id"])
+    if not path:
+        return
+    if not row["sha256"]:
+        # Rows that predate the sha256 column migrated in with DEFAULT ''.
+        print(f"[WARNING] Not deleting {path}: {subject} records no hash to "
+              f"confirm it by. Leaving it in place.")
+        return
+    try:
+        with open(path, "rb") as f:
+            on_disk = hashlib.sha256(f.read()).hexdigest()
+    except OSError as exc:
+        print(f"[WARNING] Not deleting {path}: could not read it to confirm it "
+              f"belongs to {subject}: {exc}")
+        return
+    if on_disk != row["sha256"]:
+        print(f"[WARNING] Not deleting {path}: its contents do not match "
+              f"{subject}. Leaving it in place.")
+        return
+    _remove_quietly(path, "source PDF")
+
+
 def _duplicate_response(result: dict):
     """Map a duplicate result from ingest_pdf_bytes() onto the 409 body the
     frontend already knows how to render."""
@@ -1837,6 +1988,10 @@ def upload():
     result = ingest_pdf_bytes(get_db(), file.read(), file.filename)
     if result["status"] == "duplicate":
         return _duplicate_response(result)
+    if result["status"] == "rejected":
+        # The upload panel renders `error` verbatim for any non-409, so the
+        # reason the reviewer needs has to be in that field.
+        return jsonify({"error": f"Not a usable PDF: {result['reason']}"}), 400
     return jsonify(result), 201
 
 
@@ -1845,6 +2000,80 @@ def upload():
 # The discovery queue is not a table: it is the attachments the monitor verified
 # but nobody has extracted yet. Extraction is explicitly human-triggered, so no
 # OpenAI call is ever spent by the monitor itself.
+#
+# announcements.status is the queue's memory of what has already been decided:
+#
+#     discovered --Extract--> extracted --approve--> approved
+#          ^                      |                      |
+#          +------discard---------+---delete approved----+
+#
+# 'discovered' is written by bursa/dedup.py when the monitor first sees a filing;
+# every other transition is a human action in this file. Anything other than
+# 'discovered' means somebody has already spent an extraction on it, so the queue
+# must not offer it again. A rerun (POST /pending/<id>/reject) has no transition
+# on purpose: the pending row survives, so 'extracted' is still true.
+#
+# The two return edges are the point. Without them a discard retired the filing
+# permanently — the queue said "Already extracted", no button, and no later poll
+# re-downloaded it because the attachment row still had its sha256.
+ANNOUNCEMENT_SPENT = ("extracted", "approved")
+
+
+def _set_announcement_status(db, source_attachment_id, status: str) -> None:
+    """Move the queue state of the announcement a review came from.
+
+    The only link back is pending_reviews.source_attachment_id ->
+    attachments.announcement_id, so a manual upload — which has no attachment —
+    is a no-op rather than an error.
+
+    Best-effort, like record_review_event(): this runs after the decision it
+    describes has already committed, and a queue bookkeeping failure must never
+    turn a successful approval into a 500.
+    """
+    if not source_attachment_id:
+        return
+    try:
+        db.execute(
+            """UPDATE announcements SET status = ?
+                WHERE id = (SELECT announcement_id FROM attachments WHERE id = ?)""",
+            (status, source_attachment_id),
+        )
+        db.commit()
+    except sqlite3.Error as exc:
+        print(f"[WARNING] Could not set announcement status to {status!r} for "
+              f"attachment #{source_attachment_id}: {exc}")
+
+
+def _return_to_discovery_queue(db, source_attachment_id) -> None:
+    """Hand a monitored filing back to the queue after a discard or a deletion.
+
+    "Not this" must not mean "never again". The downloaded PDF is deliberately
+    left on disk: it belongs to the attachment row, not to the review that was
+    just thrown away (extract_discovered() re-uses it via existing_path), so
+    Extract can be offered again immediately without another Bursa request.
+
+    If the file has already gone, clear the download state as well. pipeline.py
+    treats an attachment that has a sha256 as finished, so a hashed row with no
+    file can never come back on any poll — the exact dead end this exists to
+    prevent. Clearing sha256 puts the row back on the resume path, which UPDATEs
+    this same row rather than inserting another, so its id (and anything
+    referencing it) survives.
+    """
+    if not source_attachment_id:
+        return
+    _set_announcement_status(db, source_attachment_id, "discovered")
+    row = db.execute(
+        "SELECT local_path FROM attachments WHERE id = ?", (source_attachment_id,)
+    ).fetchone()
+    if row and not (row["local_path"] and os.path.exists(row["local_path"])):
+        db.execute(
+            """UPDATE attachments
+                  SET sha256 = NULL, local_path = NULL, downloaded_at = NULL
+                WHERE id = ?""",
+            (source_attachment_id,),
+        )
+        db.commit()
+
 
 @app.route("/discovered", methods=["GET"])
 def list_discovered():
@@ -1869,12 +2098,14 @@ def list_discovered():
         item = dict(row)
         # A pending row is deleted on approval, so its absence cannot mean "still
         # needs extracting" — that made a finished filing reappear as Verified /
-        # Extract (uses API credit). announcements.status is set to 'extracted'
-        # when the button is pressed and survives the handover, so the two
-        # signals together cover in-flight and completed work alike. Both are
-        # popped unconditionally: short-circuiting would leak the raw column.
+        # Extract (uses API credit). announcements.status is set when the button
+        # is pressed and survives the handover, so the two signals together cover
+        # in-flight and completed work alike. It reads a SET of statuses, not one
+        # literal: approval moves the row on to 'approved', and a discard moves it
+        # back to 'discovered' so the filing is offered again. Both are popped
+        # unconditionally: short-circuiting would leak the raw column.
         item["in_pending"] = bool(item.pop("pending_count"))
-        was_extracted = item.pop("announcement_status", None) == "extracted"
+        was_extracted = item.pop("announcement_status", None) in ANNOUNCEMENT_SPENT
         item["extracted"] = item["in_pending"] or was_extracted
         item["available"] = (
             item["verification_status"] == "verified"
@@ -1923,6 +2154,16 @@ def extract_discovered(attachment_id):
     )
     if result["status"] == "duplicate":
         return _duplicate_response(result)
+    if result["status"] == "rejected":
+        # It verified when it was downloaded, so the copy on disk has changed
+        # since. The attachment row is left exactly as it is on purpose: marking
+        # it unusable here would strand the filing the same way discarding one
+        # used to. Every retry is deterministic and free — no API call is
+        # reached — so nothing is lost by letting the queue keep offering it.
+        return jsonify({
+            "error": "not_a_usable_pdf",
+            "message": f"The stored PDF is no longer usable: {result['reason']}",
+        }), 400
 
     db.execute("UPDATE announcements SET status = 'extracted' WHERE id = ?",
                (row["announcement_id"],))
@@ -1998,83 +2239,149 @@ def approve_pending(pending_id):
     """Approve a reviewed evaluation: only now do the extracted figures and
     text get written to pdf_metadata (the database of record)."""
     db = get_db()
-    row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
-    if not row:
-        return jsonify({"error": "Not found"}), 404
 
-    if not row["downloaded_at"]:
+    # One approval at a time. Nothing serialised this route, so a double-clicked
+    # Approve ran two requests that both read the same pending row and both
+    # INSERTed: two records of account from one human decision. BEGIN IMMEDIATE
+    # takes SQLite's write lock before the row is read, so the second request
+    # only gets to look once the first has committed — by which point the
+    # pending row it would promote is gone and it is refused.
+    try:
+        db.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as exc:
         return jsonify({
-            "error": "not_reviewed",
-            "message": "Download and review the report before approving.",
-        }), 400
+            "error": "busy",
+            "message": f"The database is busy — try approving again in a moment ({exc}).",
+        }), 409
 
-    extracted_data = _apply_comparison_data(json.loads(row["extracted_data"]), db)
-    if not extracted_data.get("analysis_error"):
-        # The unit-scale audit ran at upload time against the PDF text, which is
-        # no longer to hand — carry its findings forward rather than losing them
-        # from the record the reviewer actually approved.
-        prior = extracted_data.get("validation_warnings") or []
-        carried = [w for w in prior if _SOURCE_ONLY_WARNING_RE.match(w)]
-        warnings = carried + validate_analysis(
-            extracted_data, pdf_meta={"title": row["title"], "author": row["author"]}
+    # Everything from here to the commit is one transaction: the INSERT, the
+    # re-pointed provenance and the deletion of the pending row land together or
+    # not at all. A half-done approval that lost the pending row would destroy
+    # the reviewer's work, which is worse than no approval at all.
+    #
+    # Nothing that commits may be called inside it. _refresh_approved_comparisons,
+    # _build_report_for_row, record_review_event and _set_announcement_status all
+    # commit internally, so moving any of them in here would end the claim early
+    # and silently reopen the duplicate window.
+    try:
+        row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
+        if not row:
+            db.rollback()
+            return jsonify({"error": "Not found"}), 404
+
+        if not row["downloaded_at"]:
+            db.rollback()
+            return jsonify({
+                "error": "not_reviewed",
+                "message": "Download and review the report before approving.",
+            }), 400
+
+        extracted_data = _apply_comparison_data(json.loads(row["extracted_data"]), db)
+        if not extracted_data.get("analysis_error"):
+            # The unit-scale audit ran at upload time against the PDF text, which is
+            # no longer to hand — carry its findings forward rather than losing them
+            # from the record the reviewer actually approved.
+            prior = extracted_data.get("validation_warnings") or []
+            carried = [w for w in prior if _SOURCE_ONLY_WARNING_RE.match(w)]
+            warnings = carried + validate_analysis(
+                extracted_data, pdf_meta={"title": row["title"], "author": row["author"]}
+            )
+            extracted_data["validation_warnings"] = warnings if warnings else None
+        validation_warnings_json = (
+            json.dumps(extracted_data["validation_warnings"])
+            if extracted_data.get("validation_warnings") else None
         )
-        extracted_data["validation_warnings"] = warnings if warnings else None
-    validation_warnings_json = (
-        json.dumps(extracted_data["validation_warnings"])
-        if extracted_data.get("validation_warnings") else None
-    )
 
-    cur = db.execute(
-        """INSERT INTO pdf_metadata (
-               filename, file_size, sha256, pages, title, author, creator, uploaded_at,
-               company_name, quarter_end_date, fiscal_quarter, fiscal_year, currency,
-               unit_raw,
-               revenue_current, revenue_previous_quarter, revenue_same_quarter_last_year,
-               pbt_current, pbt_previous_quarter, pbt_same_quarter_last_year,
-               management_commentary, outlook_summary, confidence_score,
-               analysis_error, validation_warnings,
-               revenue_qoq, revenue_yoy, pbt_qoq, pbt_yoy
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            row["filename"], row["file_size"], row["sha256"], row["pages"],
-            row["title"], row["author"], row["creator"], row["uploaded_at"],
-            extracted_data.get("company_name"),
-            extracted_data.get("quarter_end_date"),
-            extracted_data.get("fiscal_quarter"),
-            extracted_data.get("fiscal_year"),
-            extracted_data.get("currency"),
-            extracted_data.get("unit_raw"),
-            extracted_data.get("revenue_current"),
-            extracted_data.get("revenue_previous_quarter"),
-            extracted_data.get("revenue_same_quarter_last_year"),
-            extracted_data.get("pbt_current"),
-            extracted_data.get("pbt_previous_quarter"),
-            extracted_data.get("pbt_same_quarter_last_year"),
-            extracted_data.get("management_commentary"),
-            extracted_data.get("outlook_summary"),
-            extracted_data.get("confidence_score"),
-            extracted_data.get("analysis_error"),
-            validation_warnings_json,
-            extracted_data.get("revenue_qoq"),
-            extracted_data.get("revenue_yoy"),
-            extracted_data.get("pbt_qoq"),
-            extracted_data.get("pbt_yoy"),
-        ),
-    )
-    db.commit()
-    new_id = cur.lastrowid
+        # source_attachment_id carries the announcement this filing came from.
+        # Omitting it left every approved row NULL, so the record of account
+        # could not be traced back to the document that produced it.
+        cur = db.execute(
+            """INSERT INTO pdf_metadata (
+                   filename, file_size, sha256, pages, title, author, creator, uploaded_at,
+                   source_attachment_id,
+                   company_name, quarter_end_date, fiscal_quarter, fiscal_year, currency,
+                   unit_raw,
+                   revenue_current, revenue_previous_quarter, revenue_same_quarter_last_year,
+                   pbt_current, pbt_previous_quarter, pbt_same_quarter_last_year,
+                   management_commentary, outlook_summary, confidence_score,
+                   analysis_error, validation_warnings,
+                   revenue_qoq, revenue_yoy, pbt_qoq, pbt_yoy
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                row["filename"], row["file_size"], row["sha256"], row["pages"],
+                row["title"], row["author"], row["creator"], row["uploaded_at"],
+                row["source_attachment_id"],
+                extracted_data.get("company_name"),
+                extracted_data.get("quarter_end_date"),
+                extracted_data.get("fiscal_quarter"),
+                extracted_data.get("fiscal_year"),
+                extracted_data.get("currency"),
+                extracted_data.get("unit_raw"),
+                extracted_data.get("revenue_current"),
+                extracted_data.get("revenue_previous_quarter"),
+                extracted_data.get("revenue_same_quarter_last_year"),
+                extracted_data.get("pbt_current"),
+                extracted_data.get("pbt_previous_quarter"),
+                extracted_data.get("pbt_same_quarter_last_year"),
+                extracted_data.get("management_commentary"),
+                extracted_data.get("outlook_summary"),
+                extracted_data.get("confidence_score"),
+                extracted_data.get("analysis_error"),
+                validation_warnings_json,
+                extracted_data.get("revenue_qoq"),
+                extracted_data.get("revenue_yoy"),
+                extracted_data.get("pbt_qoq"),
+                extracted_data.get("pbt_yoy"),
+            ),
+        )
+        new_id = cur.lastrowid
+
+        # Re-point the provenance at the approved entry BEFORE building the
+        # report (which now happens after the commit). The observations are
+        # separate rows, so they survive the pending row being deleted — but
+        # load_evidence() keys on pdf_metadata_id, so building first produced an
+        # approved report with no Source Traceability section at all, and
+        # persisted report_path pointing at it.
+        db.execute(
+            "UPDATE metric_observations SET pdf_metadata_id = ? WHERE pending_review_id = ?",
+            (new_id, pending_id),
+        )
+        # Deleting the pending row is the claim on this approval: it is in the
+        # same transaction as the INSERT, so whoever commits first is the only
+        # one who can have promoted it.
+        db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
+        db.commit()
+    except sqlite3.IntegrityError:
+        # The unique index on pdf_metadata.sha256: this document is already a
+        # record of account. Leave the pending review in place for the human.
+        db.rollback()
+        existing = db.execute(
+            "SELECT id, filename FROM pdf_metadata WHERE sha256 = ?", (row["sha256"],)
+        ).fetchone()
+        return jsonify({
+            "error": "duplicate",
+            "message": (
+                f'This document is already saved as "{existing["filename"]}" (entry '
+                f"#{existing['id']}). The pending review has been left in place."
+                if existing else
+                "This document is already saved as an approved entry. "
+                "The pending review has been left in place."
+            ),
+            "existing_id": existing["id"] if existing else None,
+        }), 409
+    except Exception:
+        # Nothing partial reaches the record of account, and the pending review
+        # survives to be approved again.
+        db.rollback()
+        raise
+
     _refresh_approved_comparisons(db)
 
-    # Re-point the provenance at the approved entry BEFORE building the report.
-    # The observations are separate rows, so they survive the pending row being
-    # deleted — but load_evidence() keys on pdf_metadata_id, so building first
-    # produced an approved report with no Source Traceability section at all,
-    # and persisted report_path pointing at it.
-    db.execute(
-        "UPDATE metric_observations SET pdf_metadata_id = ? WHERE pending_review_id = ?",
-        (new_id, pending_id),
-    )
-    db.commit()
+    # It is in the record of account now, so the queue must stop calling it work
+    # in progress. 'approved' rather than leaving it at 'extracted': the two mean
+    # different things to a person reading the trail, and it makes 'extracted'
+    # mean exactly "a pending review exists".
+    _set_announcement_status(db, row["source_attachment_id"], "approved")
 
     report_available = False
     try:
@@ -2084,14 +2391,16 @@ def approve_pending(pending_id):
     except Exception as exc:
         print(f"[WARNING] Could not generate final PDF report for entry #{new_id}: {exc}")
 
-    # The pending row is about to be deleted, so record the trail against both
-    # subjects: the pending id that is disappearing and the entry it became.
+    # The pending row is gone, so record the trail against both subjects: the
+    # pending id that has disappeared and the entry it became. Logging is
+    # best-effort by design and stays outside the transaction above — it must
+    # never be able to roll back the approval it is describing.
     record_review_event(db, "pending", pending_id, "approved",
                         note=f"Promoted to approved entry #{new_id}")
     record_review_event(db, "approved", new_id, "approved",
                         note=f"Promoted from pending #{pending_id}")
 
-    # Clean up the draft report and the pending record now it's been promoted.
+    # Clean up the draft report now the review has been promoted.
     #
     # Deleting the draft is housekeeping and must never fail the approval. The
     # row is already committed to pdf_metadata by this point, so an exception
@@ -2100,8 +2409,6 @@ def approve_pending(pending_id):
     # review. Windows raises exactly this when the draft is still held open by a
     # reader that has not released it yet.
     _remove_quietly(row["report_path"], "draft report")
-    db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
-    db.commit()
 
     return jsonify({
         "id":                             new_id,
@@ -2245,21 +2552,25 @@ def delete_pending(pending_id):
     if not row:
         return jsonify({"error": "Not found"}), 404
 
-    # Deleting is irreversible, so confirm the file on disk is the one this
-    # review was made from before removing it. A basename collision between
-    # uploads/ and attachments/ would otherwise destroy an unrelated document.
-    path = locate_pending_file(row["filename"], db, row["source_attachment_id"])
-    if path:
-        with open(path, "rb") as f:
-            on_disk = hashlib.sha256(f.read()).hexdigest()
-        if on_disk == row["sha256"]:
-            _remove_quietly(path, "source PDF")
-        else:
-            print(f"[WARNING] Not deleting {path}: its contents do not match "
-                  f"pending review #{pending_id}. Leaving it in place.")
+    if row["source_attachment_id"]:
+        # A monitored filing: the PDF in attachments/ is the attachment's, not
+        # this review's. Discarding is the reviewer rejecting the extraction, not
+        # the filing — so hand it back to the queue and leave the download alone.
+        # Deleting it used to retire the announcement permanently, since no later
+        # poll re-downloads a row that already has its sha256.
+        _return_to_discovery_queue(db, row["source_attachment_id"])
+    else:
+        # An upload owns its file. Deleting is irreversible, so confirm the file
+        # on disk is the one this review was made from before removing it. A
+        # basename collision between uploads/ and attachments/ would otherwise
+        # destroy an unrelated document.
+        _remove_source_pdf(db, row, f"pending review #{pending_id}")
     _remove_quietly(row["report_path"], "draft report")
-    record_review_event(db, "pending", pending_id, "discarded",
-                        note=f"Discarded {row['filename']} without saving")
+    record_review_event(
+        db, "pending", pending_id, "discarded",
+        note=(f"Discarded {row['filename']} without saving"
+              + ("; returned to the discovery queue" if row["source_attachment_id"] else "")),
+    )
     db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
     db.commit()
     return jsonify({"deleted": pending_id})
@@ -2311,14 +2622,30 @@ def download_report(pdf_id):
 def delete_pdf(pdf_id):
     db = get_db()
     row = db.execute(
-        "SELECT filename, report_path FROM pdf_metadata WHERE id = ?", (pdf_id,)
+        "SELECT filename, report_path, sha256, source_attachment_id "
+        "FROM pdf_metadata WHERE id = ?", (pdf_id,)
     ).fetchone()
     if not row:
         return jsonify({"error": "Not found"}), 404
-    _remove_quietly(locate_pending_file(row["filename"]), "source PDF")
+    if row["source_attachment_id"]:
+        # Deleting the record of account for a monitored filing is the reviewer
+        # asking to do this one again, so put it back in the queue and keep the
+        # download — destroying it would strand the announcement exactly as
+        # discarding one used to.
+        _return_to_discovery_queue(db, row["source_attachment_id"])
+    else:
+        # Same rule as discarding a pending review: confirm the file's hash
+        # before deleting it. Resolving by basename alone scanned uploads/ then
+        # attachments/ and took the first hit, so deleting an approved entry
+        # could destroy an unrelated document that happened to share a filename.
+        _remove_source_pdf(db, row, f"approved entry #{pdf_id}")
     _remove_quietly(row["report_path"], "report")
     db.execute("DELETE FROM pdf_metadata WHERE id = ?", (pdf_id,))
     db.commit()
+    # This entry may have been another quarter's comparison basis. Approval is
+    # the event that fills those in; deletion is the event that invalidates them,
+    # and both are a person clicking something.
+    _refresh_approved_comparisons(db)
     return jsonify({"deleted": pdf_id})
 
 
@@ -2360,14 +2687,26 @@ if __name__ == "__main__":
     # whatever network the machine was on, and debug=True served the Werkzeug
     # console alongside them.
     #
-    # EARNINGS_BIND exists for the deliberate case (a reverse proxy that adds
-    # auth). It warns, because on an untrusted network it voids the mandatory
-    # human review this whole tool is built around.
+    # EARNINGS_BIND and EARNINGS_DEBUG exist for the deliberate cases (a reverse
+    # proxy that adds auth; a developer debugging locally). Both warn, because on
+    # an untrusted network either one voids the mandatory human review this whole
+    # tool is built around.
     host = os.environ.get("EARNINGS_BIND", "127.0.0.1")
     if host != "127.0.0.1":
         print(f"[WARNING] Binding {host} — every route is unauthenticated, including "
               f"approval and evaluation. Only do this behind something that authenticates.")
     debug = os.environ.get("EARNINGS_DEBUG", "").lower() in ("1", "true", "yes")
+    if debug:
+        # Say it as loudly as the bind warning. The Werkzeug debugger is an
+        # interactive Python console on the traceback page: anything that can
+        # reach it runs code as this user, on the machine holding pdfs.db, the
+        # source PDFs and .env.
+        print("[WARNING] EARNINGS_DEBUG is set — the Werkzeug debugger is a remote "
+              "code execution console on any error page. Development only.")
+        if host != "127.0.0.1":
+            print("[DANGER] Debugger enabled AND bound to "
+                  f"{host}: that console is reachable from the network, "
+                  "unauthenticated. Do not run this. Unset EARNINGS_DEBUG.")
 
     print(f"Starting Earnings Report Assistant at http://{host}:5000")
     app.run(debug=debug, host=host, port=5000)

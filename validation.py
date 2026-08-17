@@ -53,6 +53,9 @@ MONETARY_FIELDS = (
     "pbt_current", "pbt_previous_quarter", "pbt_same_quarter_last_year",
 )
 
+# Corporate forms, filing boilerplate and generic report vocabulary — none of it
+# identifies a company, so it is ignored when comparing a PDF's metadata against
+# the company name the model extracted from the document body.
 _NON_IDENTIFYING_TOKENS = {
     "inc", "ltd", "limited", "llc", "plc", "corp", "corporation", "co", "company",
     "holding", "holdings", "group", "ab", "publ", "kk", "pte", "bhd", "berhad",

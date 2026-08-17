@@ -633,7 +633,7 @@
         <td>
           <div class="pending-actions">
             <a class="btn-report" href="/pending/${p.id}/report" target="_blank" onclick="markDownloaded(${p.id})" title="Download the draft review PDF">⬇ Download</a>
-            <button class="btn-approve" onclick="approvePending(${p.id})" title="Save the extracted figures to the database">Approve</button>
+            <button class="btn-approve" onclick="approvePending(${p.id}, this)" title="Save the extracted figures to the database">Approve</button>
             <input type="text" class="fail-notes" id="notes-${p.id}" placeholder="Notes for the rerun (optional)" />
             <button class="btn-fail" onclick="failPending(${p.id})" title="Rerun the LLM extraction with your notes">Fail &amp; Rerun</button>
             <button class="btn-discard" onclick="discardPending(${p.id})" title="Discard this upload entirely">Discard</button>
@@ -771,7 +771,11 @@
     }
 
     // ---- Pending review: actions ----
-    async function approvePending(id) {
+    async function approvePending(id, btn) {
+      // One click, one record of account. The server refuses the second request
+      // now, but there is no reason to send it — and the 404 it comes back with
+      // reads like something was lost.
+      if (btn) btn.disabled = true;
       try {
         const res = await fetch(`/pending/${id}/approve`, { method: "POST" });
         const body = await res.json();
@@ -788,6 +792,8 @@
         }
       } catch {
         showToast("Network error while approving.", "error");
+      } finally {
+        if (btn) btn.disabled = false;
       }
     }
 

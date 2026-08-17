@@ -50,7 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int,
                    help="Process at most N matched announcements this run")
     p.add_argument("--dry-run", action="store_true",
-                   help="Fetch and match, but download nothing and write nothing")
+                   help="Fetch and match, but download nothing and record no "
+                        "announcements or attachments (the schema and the "
+                        "watchlist seed are still applied)")
     p.add_argument("--fixture-dir", metavar="DIR",
                    help="Replay saved payloads from DIR instead of making requests")
     p.add_argument("--fixture-listing", default="announcements_objects.json",
@@ -81,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
+    # Creates the schema and seeds companies from watchlist.json. Both are needed
+    # even for --dry-run: on a fresh database there would otherwise be no tables
+    # to read and no watchlist to match against, so the run would report zero
+    # matches and look like a quiet hour. It writes nothing to pdf_metadata —
+    # see the note at the end of init_db().
     app.init_db()
 
     if args.fixture_dir:

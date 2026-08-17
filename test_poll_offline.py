@@ -13,6 +13,8 @@ import shutil
 import socket
 import sys
 import tempfile
+import threading
+import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -432,6 +434,203 @@ done = [i for i in client.get("/discovered").get_json() if i["id"] == first_id][
 check("an approved filing is still marked extracted", done["extracted"] is True)
 check("and is not re-offered for a paid extraction", done["available"] is False)
 check("and the panel reports it is no longer pending", done["in_pending"] is False)
+
+print("\nthe approved record knows which filing it was made from:")
+with app.app.app_context():
+    db = app.get_db()
+    entry = db.execute("SELECT id, source_attachment_id FROM pdf_metadata").fetchone()
+    approved_id = entry["id"]
+    check("provenance carried onto the record of account",
+          entry["source_attachment_id"] == first_id, repr(entry["source_attachment_id"]))
+    check("the announcement is recorded as approved, not merely extracted",
+          db.execute("""SELECT n.status FROM announcements n JOIN attachments a
+                          ON a.announcement_id = n.id WHERE a.id = ?""",
+                     (first_id,)).fetchone()["status"] == "approved")
+    local_path = db.execute("SELECT local_path FROM attachments WHERE id = ?",
+                            (first_id,)).fetchone()["local_path"]
+
+print("\ndeleting the approved entry hands the filing back to the queue:")
+# Deleting the record of account is the reviewer asking to do this one again.
+# The downloaded PDF belongs to the attachment, not to the record, so it stays:
+# destroying it would strand the announcement, because no later poll re-downloads
+# a row that already has its sha256.
+check("delete succeeds", client.delete(f"/pdfs/{approved_id}").status_code == 200)
+back = [i for i in client.get("/discovered").get_json() if i["id"] == first_id][0]
+check("the filing is offered for extraction again",
+      back["extracted"] is False and back["available"] is True, str(back)[:200])
+check("and its downloaded PDF was not destroyed with the record",
+      os.path.exists(local_path), local_path)
+
+print("\ndiscarding a review returns the filing rather than retiring it:")
+again = client.post(f"/discovered/{first_id}/extract")
+check("extraction is offered again and works", again.status_code == 201,
+      f"{again.status_code} {again.get_data(as_text=True)[:160]}")
+pending2 = again.get_json()["id"]
+check("discard succeeds", client.delete(f"/pending/{pending2}").status_code == 200)
+requeued = [i for i in client.get("/discovered").get_json() if i["id"] == first_id][0]
+check("the queue offers it once more",
+      requeued["extracted"] is False and requeued["available"] is True, str(requeued)[:200])
+check("the download survived the discarded review", os.path.exists(local_path))
+third = client.post(f"/discovered/{first_id}/extract")
+check("and extracting really does work — the discard was not a dead end",
+      third.status_code == 201, str(third.status_code))
+
+print("\na requeued filing whose PDF has gone is re-fetched by the next poll:")
+os.remove(local_path)
+check("discard succeeds", client.delete(f"/pending/{third.get_json()['id']}").status_code == 200)
+with app.app.app_context():
+    db = app.get_db()
+    row = db.execute("SELECT sha256, local_path FROM attachments WHERE id = ?",
+                     (first_id,)).fetchone()
+    check("the download state is cleared, putting the row back on the resume path",
+          row["sha256"] is None and row["local_path"] is None, str(tuple(row)))
+    resumed = pipeline.run_poll(db, new_client(), attachments_folder=app.ATTACHMENTS_FOLDER)
+    check("the next poll fetches it again", resumed["downloaded"] >= 1, str(dict(resumed)))
+    row = db.execute("SELECT id, sha256, local_path FROM attachments WHERE id = ?",
+                     (first_id,)).fetchone()
+    check("the same attachment row is completed, not a second one",
+          row is not None and row["sha256"] and row["local_path"]
+          and os.path.exists(row["local_path"]), str(tuple(row) if row else row))
+    check("and no duplicate attachment rows were created",
+          db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2,
+          str(db.execute("SELECT id, sha256 FROM attachments").fetchall()))
+
+print("\napproving twice writes one record of account, not two:")
+# Nothing serialised this route, so a double-clicked Approve ran two requests
+# that both read the same pending row and both INSERTed: two records of account
+# from one human decision. Calling it twice in sequence cannot reproduce that —
+# the second request simply finds the row gone — so both are released together.
+staged = client.post(f"/discovered/{first_id}/extract")
+check("[setup] the filing is staged for review", staged.status_code == 201,
+      f"{staged.status_code} {staged.get_data(as_text=True)[:160]}")
+race_pending = staged.get_json()["id"]
+check("[setup] the draft report is downloaded, arming the gate",
+      client.get(f"/pending/{race_pending}/report").status_code == 200)
+
+race_results = []
+race_barrier = threading.Barrier(2)
+race_entered = threading.Event()
+_real_validate = app.validate_analysis
+
+
+def _slow_validate(*a, **kw):
+    """Hold the first request open just inside the approval.
+
+    Releasing the two requests at the same instant is not enough on its own —
+    whether they overlap is then down to thread scheduling. This makes the
+    overlap certain: whoever gets in first stays inside the route while the
+    other reaches it. Without serialisation both requests have read the same
+    pending row by now and both go on to INSERT.
+    """
+    if not race_entered.is_set():
+        race_entered.set()
+        time.sleep(0.5)
+    return _real_validate(*a, **kw)
+
+
+def _approve_racing():
+    # A client per thread: each request gets its own app context, so each gets
+    # its own SQLite connection — two genuinely competing writers.
+    thread_client = app.app.test_client()
+    race_barrier.wait()
+    resp = thread_client.post(f"/pending/{race_pending}/approve")
+    race_results.append((resp.status_code, resp.get_json()))
+
+
+app.validate_analysis = _slow_validate
+race_threads = [threading.Thread(target=_approve_racing) for _ in range(2)]
+for t in race_threads:
+    t.start()
+for t in race_threads:
+    t.join()
+app.validate_analysis = _real_validate
+
+race_codes = sorted(code for code, _ in race_results)
+race_created = [body for code, body in race_results if code == 201]
+check("exactly one request created an entry", len(race_created) == 1, str(race_codes))
+check("the other was refused, not crashed", race_codes[1] < 500, str(race_codes))
+
+with app.app.app_context():
+    db = app.get_db()
+    entries = db.execute("SELECT id, sha256, source_attachment_id FROM pdf_metadata").fetchall()
+    check("one record of account for the filing, not two", len(entries) == 1,
+          str([tuple(e) for e in entries]))
+    race_entry = entries[0]["id"]
+    check("the pending review was consumed exactly once",
+          db.execute("SELECT COUNT(*) FROM pending_reviews").fetchone()[0] == 0,
+          str(db.execute("SELECT id FROM pending_reviews").fetchall()))
+    check("provenance still reaches the announcement it was made from",
+          entries[0]["source_attachment_id"] == first_id,
+          repr(entries[0]["source_attachment_id"]))
+    check("its evidence points at that one entry",
+          [r["pdf_metadata_id"] for r in db.execute(
+              "SELECT DISTINCT pdf_metadata_id FROM metric_observations "
+              "WHERE pending_review_id = ?", (race_pending,))] == [race_entry],
+          str(db.execute("SELECT DISTINCT pdf_metadata_id FROM metric_observations "
+                         "WHERE pending_review_id = ?", (race_pending,)).fetchall()))
+
+settled_queue = [i for i in client.get("/discovered").get_json() if i["id"] == first_id][0]
+check("and the queue stops offering a paid extraction for it",
+      settled_queue["extracted"] is True and settled_queue["available"] is False,
+      str(settled_queue)[:200])
+
+print("\ndeleting an approved entry never destroys a document it cannot confirm:")
+# uploads/ and attachments/ de-collide only within themselves, so a monitored
+# filing and an unrelated hand upload can share a basename — and resolving the
+# file to delete by name alone searched uploads/ first, so deleting the
+# monitored entry destroyed the upload instead of its own PDF.
+with app.app.app_context():
+    db = app.get_db()
+    monitored_name = db.execute("SELECT filename FROM pdf_metadata WHERE id = ?",
+                                (race_entry,)).fetchone()["filename"]
+    monitored_path = db.execute("SELECT local_path FROM attachments WHERE id = ?",
+                                (first_id,)).fetchone()["local_path"]
+decoy = os.path.join(app.UPLOAD_FOLDER, monitored_name)
+with open(decoy, "wb") as f:
+    f.write(b"%PDF-1.4 an unrelated upload that happens to share a name\n")
+check("[setup] the same basename now exists in uploads/ and attachments/",
+      os.path.exists(decoy) and os.path.exists(monitored_path)
+      and os.path.basename(monitored_path) == monitored_name,
+      f"{decoy} / {monitored_path}")
+
+check("delete succeeds", client.delete(f"/pdfs/{race_entry}").status_code == 200)
+check("the unrelated document sharing the basename survives", os.path.exists(decoy),
+      "resolving the file by basename would have destroyed this")
+check("and the monitored filing's own download is kept for a re-extraction",
+      os.path.exists(monitored_path), monitored_path)
+
+print("\nan upload's file is deleted only while it is still the file that was recorded:")
+sample_bytes = open(SAMPLE, "rb").read()
+
+
+def variant(tag: bytes) -> bytes:
+    """A byte-distinct copy of the sample filing, so each case below is its own
+    document as far as the duplicate check is concerned. Trailing bytes after
+    %%EOF are ignored by readers, so it still parses as a PDF."""
+    return sample_bytes + b"\n%% " + tag + b"\n"
+
+
+def approve_upload(tag: bytes):
+    """Hand-upload a document and approve it. Returns (entry id, stored path)."""
+    with app.app.app_context():
+        result = app.ingest_pdf_bytes(app.get_db(), variant(tag), f"{tag.decode()}.pdf")
+    client.get(f"/pending/{result['id']}/report")  # stamps downloaded_at
+    entry = client.post(f"/pending/{result['id']}/approve").get_json()
+    return entry["id"], os.path.join(app.UPLOAD_FOLDER, result["filename"])
+
+
+swapped_entry, swapped_path = approve_upload(b"swapped")
+with open(swapped_path, "wb") as f:
+    f.write(b"%PDF-1.4 a different document now occupies this name\n")
+check("delete succeeds", client.delete(f"/pdfs/{swapped_entry}").status_code == 200)
+check("a file whose contents are not the recorded ones is left for a human",
+      os.path.exists(swapped_path), swapped_path)
+
+owned_entry, owned_path = approve_upload(b"owned")
+check("[setup] the upload's own file is on disk", os.path.exists(owned_path), owned_path)
+check("delete succeeds", client.delete(f"/pdfs/{owned_entry}").status_code == 200)
+check("its own file, hash confirmed, IS removed", not os.path.exists(owned_path),
+      "otherwise the checks above would pass by never deleting anything")
 
 missing = client.post("/discovered/9999/extract")
 check("unknown attachment gives 404", missing.status_code == 404)
