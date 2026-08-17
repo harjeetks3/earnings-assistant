@@ -22,9 +22,14 @@ These are product constraints, not preferences. Do not relax them without being 
 ## Honesty rules
 
 - **Never state an evaluation pass rate that was not actually produced by a run**, and always say
-  whether a figure came from a *live* run or an *offline replay* of stored model outputs. The
-  current numbers live in `docs/PROJECT_STATE.md` — read them there rather than recalling them.
-  This has already caused one documentation defect; do not repeat it.
+  whether a figure came from a *live* run or an *offline replay*, and **which commit it measured**.
+  A number without a date and a commit rots into a claim about today's code. The current numbers
+  live in `docs/PROJECT_STATE.md` — read them there rather than recalling them. This has already
+  caused one documentation defect; do not repeat it.
+- **A replay is not a measurement of the model.** No replay harness is committed and the stored
+  eval JSON holds no raw model output, so a replay re-checks recorded per-field results — it
+  cannot tell you anything about how the model responds today. `docs/PROJECT_STATE.md` spells out
+  which questions a replay structurally cannot answer.
 - **Extraction is not deterministic.** The same PDF can extract correctly on one run and wrongly on
   the next. Never write a test expectation that requires the model to make a particular mistake.
 - The evaluation suite costs money and sends local test PDFs to OpenAI. **Ask before running it.**
@@ -45,9 +50,18 @@ These are product constraints, not preferences. Do not relax them without being 
 ## Commands
 
 ```bash
-.venv/Scripts/python.exe app.py           # serve on http://localhost:5000
-.venv/Scripts/python.exe -m pytest        # offline test suite — must make no network calls
+.venv/Scripts/python.exe app.py           # serve on http://127.0.0.1:5000
+.venv/Scripts/python.exe run_tests.py     # offline test suite — must make no network calls
 ```
+
+`run_tests.py` runs every `test_*.py` in the project root, each in its own process, and exits
+non-zero if any suite fails. There is **no pytest** — it is not installed, not in
+`requirements.txt`, and the suites are plain scripts that assert at import time, so
+`python -m pytest` collects nothing. Do not add it; add a `test_*.py` script instead.
+
+`app.py` binds loopback with the debugger off. `EARNINGS_BIND` and `EARNINGS_DEBUG` override that
+and both are dangerous, because **no route has any authentication** — see *Running it safely* in
+`docs/PROJECT_STATE.md` before setting either.
 
 The eval harness runs via `POST /evaluate` or `run_evaluation()`. See the honesty rules above.
 
@@ -57,5 +71,6 @@ The eval harness runs via `POST /evaluate` or `run_evaluation()`. See the honest
   `ALTER TABLE`-for-missing-columns pattern. Additive only; the DB migrates itself on startup.
 - **Tests make no network calls.** Anything touching a live source belongs behind an explicit
   opt-in flag and stays out of the default suite.
-- Match the surrounding code style: plain stdlib, no frameworks beyond Flask/Pydantic/ReportLab.
+- Match the surrounding code style: plain stdlib, nothing beyond what `requirements.txt` already
+  lists (Flask, pypdf, openai, python-dotenv, Pydantic, ReportLab).
 - Never commit `.env`. It was exposed once already and the history had to be scrubbed.
