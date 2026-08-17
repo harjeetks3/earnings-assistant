@@ -131,6 +131,48 @@ check("detail url is not the pdf",
 print("\nparser: empty is not the same as broken")
 check("empty payload returns []", parse_json(fixture("announcements_empty.json")) == [])
 
+print("\nparser: malformed HTML degrades, it does not kill the poll")
+# An unclosed <td> leaves a cell open past its </tr>; the next </td> then closed
+# that cell into a row that no longer existed, raising AttributeError straight
+# through parse_html. Only reachable via the opt-in --html fallback -- which is
+# precisely the path that runs on a schedule with nobody watching it.
+STRAY_END_TD = (
+    "<table><tr>"
+    "<td>1</td><td>16 Aug 2026</td><td>ACME BERHAD</td><td>Quarterly rpt"
+    "</tr></td></table>"
+)
+stray, crashed = None, None
+try:
+    stray = parse_html(STRAY_END_TD)
+except ParserError as exc:
+    crashed = exc
+except Exception as exc:  # the regression being guarded against
+    crashed = exc
+check("stray </td> after </tr> raises nothing unhandled",
+      crashed is None or isinstance(crashed, ParserError), repr(crashed))
+check("and the unclosed cell is kept rather than dropped",
+      stray is not None and len(stray) == 1 and stray[0].title == "Quarterly rpt",
+      repr(stray))
+
+NESTED_TABLE = (
+    "<table><tr>"
+    "<td>1</td><td>16 Aug 2026</td>"
+    "<td><table><tr><td>ACME BERHAD</td></tr></table></td>"
+    "<td>Quarterly rpt</td>"
+    "</tr></table>"
+)
+crashed = None
+try:
+    parse_html(NESTED_TABLE)
+except ParserError:
+    pass
+except Exception as exc:
+    crashed = exc
+check("a nested table raises nothing unhandled", crashed is None, repr(crashed))
+
+check("and a well-formed listing still parses unchanged",
+      len(parse_html(fixture("announcements_listing.html"))) == 4)
+
 print("\nparser: the REAL captured response, field by field")
 # Captured from the live endpoint 2026-08-16 via the site's own network tab.
 # This is the ground truth for COLUMN_ORDER: [row number, date, company, title],

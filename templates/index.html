@@ -676,7 +676,9 @@
       let status, action;
       if (d.extracted) {
         status = `<span class="conf high">Extracted</span>`;
-        action = `<span style="color:#6b7280;font-size:0.8rem;">Now in Pending Review</span>`;
+        action = d.in_pending
+          ? `<span style="color:#6b7280;font-size:0.8rem;">Now in Pending Review</span>`
+          : `<span style="color:#6b7280;font-size:0.8rem;">Already extracted — no credit needed</span>`;
       } else if (d.verification_status === "already_ingested") {
         status = `<span class="conf medium">Already handled</span>`;
         action = `<span style="color:#6b7280;font-size:0.8rem;">${escapeHtml(d.verification_detail || "")}</span>`;

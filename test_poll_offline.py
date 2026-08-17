@@ -409,6 +409,30 @@ again = client.post(f"/discovered/{first_id}/extract")
 check("extracting the same file twice is refused as a duplicate",
       again.status_code == 409, str(again.status_code))
 
+print("\nthe queue survives the pending row being deleted on approval:")
+# `extracted` was derived from a pending_reviews count, and approval deletes that
+# row -- so a finished filing reverted to Verified / Extract (uses API credit).
+# No credit was actually burned, because the duplicate check 409s first, but the
+# panel whose entire job is saying what still needs attention said the opposite.
+pending_id = body["id"]
+report = client.get(f"/pending/{pending_id}/report")
+check("draft report downloads, arming the approval gate",
+      report.status_code == 200, str(report.status_code))
+approved = client.post(f"/pending/{pending_id}/approve")
+check("approval succeeds", approved.status_code in (200, 201),
+      f"{approved.status_code} {approved.get_data(as_text=True)[:160]}")
+
+with app.app.app_context():
+    db = app.get_db()
+    check("the pending row is gone, as approval intends",
+          db.execute("SELECT COUNT(*) FROM pending_reviews WHERE id = ?",
+                     (pending_id,)).fetchone()[0] == 0)
+
+done = [i for i in client.get("/discovered").get_json() if i["id"] == first_id][0]
+check("an approved filing is still marked extracted", done["extracted"] is True)
+check("and is not re-offered for a paid extraction", done["available"] is False)
+check("and the panel reports it is no longer pending", done["in_pending"] is False)
+
 missing = client.post("/discovered/9999/extract")
 check("unknown attachment gives 404", missing.status_code == 404)
 

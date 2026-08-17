@@ -409,14 +409,22 @@ class _TableParser(HTMLParser):
             self._cell.append(data)
 
     def handle_endtag(self, tag):
+        # A cell can outlive its row on malformed markup: an unclosed <td> before
+        # </tr> leaves _cell set after _row is cleared, and the next stray </td>
+        # then closed a cell into a row that no longer existed — an AttributeError
+        # that escaped parse_html and would take a scheduled poll down with it.
+        # Closing a cell must therefore never assume its row is still open.
         if tag in ("td", "th") and self._cell is not None:
-            if tag == "a":
-                self._cell.append("</a>")
-            self._row.append("".join(self._cell))
+            if self._row is not None:
+                self._row.append("".join(self._cell))
             self._cell = None
         elif tag == "a" and self._cell is not None:
             self._cell.append("</a>")
         elif tag == "tr" and self._row is not None:
+            if self._cell is not None:
+                # Unclosed <td>: keep what it collected rather than dropping it.
+                self._row.append("".join(self._cell))
+                self._cell = None
             if self._row:
                 self.rows.append(self._row)
             self._row = None
@@ -432,7 +440,14 @@ def parse_html(payload) -> list[Announcement]:
         raise ParserError(f"Unsupported payload type: {type(payload).__name__}")
 
     parser = _TableParser()
-    parser.feed(payload)
+    try:
+        parser.feed(payload)
+    except Exception as exc:
+        # Malformed markup is a payload this parser does not understand, which is
+        # exactly what ParserError means — and the pipeline already handles it by
+        # noting the run and moving on. Anything else escapes as an unhandled
+        # crash and kills the poll. Mirrors the guard in _extract_links().
+        raise ParserError(f"HTML listing could not be parsed: {exc}") from exc
     if not parser.rows:
         raise ParserError("No <tr> rows found in HTML listing")
 

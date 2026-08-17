@@ -15,63 +15,16 @@ except ImportError:
 from flask import Flask, request, jsonify, render_template, g, send_file
 
 # ---------- PDF handling ----------
-
-try:
-    import pypdf
-
-    def get_pdf_metadata(path):
-        with open(path, "rb") as f:
-            reader = pypdf.PdfReader(f)
-            info = reader.metadata or {}
-            return {
-                "title": info.get("/Title", ""),
-                "author": info.get("/Author", ""),
-                "creator": info.get("/Creator", ""),
-                "pages": len(reader.pages),
-            }
-
-    def extract_pdf_pages(path):
-        """Per-page text. extract_pdf_text() is the concatenation of these, so
-        a character offset into that string can be mapped back to a page."""
-        with open(path, "rb") as f:
-            reader = pypdf.PdfReader(f)
-            return [page.extract_text() or "" for page in reader.pages]
-
-    def extract_pdf_text(path):
-        return PAGE_SEPARATOR.join(extract_pdf_pages(path))
-
-except ImportError:
-    pypdf = None
-
-    def get_pdf_metadata(path):
-        return {"title": "", "author": "", "creator": "", "pages": None}
-
-    def extract_pdf_pages(path):
-        return []
-
-    def extract_pdf_text(path):
-        return ""
-
-
-# How pages are joined into the single text block the LLM sees. Named because
-# evidence offsets are computed against exactly this layout.
-PAGE_SEPARATOR = "\n\n"
-
-
-def page_for_offset(offset: int, pages: list) -> int | None:
-    """1-based page number containing a character offset in the joined text.
-
-    Page-level evidence was previously impossible because pages were flattened
-    into one string with no record of the boundaries. This reconstructs them."""
-    if offset is None or not pages:
-        return None
-    cursor = 0
-    for index, page_text in enumerate(pages, start=1):
-        end = cursor + len(page_text)
-        if offset < end:
-            return index
-        cursor = end + len(PAGE_SEPARATOR)
-    return len(pages)
+# Moved to pdftext.py. Re-exported here so `app.extract_pdf_text` and friends
+# keep working for callers and tests that already reference them.
+from pdftext import (  # noqa: E402,F401
+    PAGE_SEPARATOR,
+    extract_pdf_pages,
+    extract_pdf_text,
+    get_pdf_metadata,
+    page_for_offset,
+    pypdf,
+)
 
 # ---------- PDF review report generation ----------
 
@@ -356,44 +309,20 @@ def generate_report_pdf(data: dict, out_path: str) -> None:
 
 
 # ---------- Pydantic validation ----------
-
-try:
-    from pydantic import BaseModel, Field, field_validator, ValidationError
-    from typing import Optional
-
-    class EarningsReport(BaseModel):
-        model_config = {"extra": "ignore"}   # silently drop unexpected keys from LLM
-
-        company_name:                   Optional[str]   = None
-        quarter_end_date:               Optional[str]   = None
-        fiscal_quarter:                 Optional[str]   = None
-        fiscal_year:                    Optional[int]   = None
-        currency:                       Optional[str]   = None
-        unit_raw:                       Optional[str]   = None
-        revenue_current:                Optional[float] = None
-        revenue_previous_quarter:       Optional[float] = None
-        revenue_same_quarter_last_year: Optional[float] = None
-        pbt_current:                    Optional[float] = None
-        pbt_previous_quarter:           Optional[float] = None
-        pbt_same_quarter_last_year:     Optional[float] = None
-        management_commentary:          Optional[str]   = None
-        outlook_summary:                Optional[str]   = None
-        confidence_score:               Optional[float] = None
-
-    _pydantic_available = True
-
-except ImportError:
-    _pydantic_available = False
-    ValidationError = Exception
-
-
-VALID_QUARTERS = {"Q1", "Q2", "Q3", "Q4"}
-VALID_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-MONETARY_FIELDS = (
-    "revenue_current", "revenue_previous_quarter", "revenue_same_quarter_last_year",
-    "pbt_current", "pbt_previous_quarter", "pbt_same_quarter_last_year",
+# Moved to validation.py, which the bursa package can import without pulling in
+# Flask. Re-exported so `app.validate_analysis` and friends keep resolving.
+from validation import (  # noqa: E402,F401
+    DATE_RE,
+    MONETARY_FIELDS,
+    VALID_CURRENCY_RE,
+    VALID_QUARTERS,
+    EarningsReport,
+    ValidationError,
+    _identifying_tokens,
+    _NON_IDENTIFYING_TOKENS,
+    _pydantic_available,
+    _TOKEN_SPLIT_RE,
+    validate_analysis,
 )
 
 
@@ -820,169 +749,6 @@ def evidence_summary_warning(evidence_records: list) -> list[str]:
         f"line in the document ({', '.join(untraced)}) — verify these against the "
         f"original report before relying on them"
     ]
-
-
-_NON_IDENTIFYING_TOKENS = {
-    "inc", "ltd", "limited", "llc", "plc", "corp", "corporation", "co", "company",
-    "holding", "holdings", "group", "ab", "publ", "kk", "pte", "bhd", "berhad",
-    "nv", "sa", "gmbh", "kgaa", "asa", "oyj", "spa", "pty",
-    "annual", "interim", "quarterly", "quarter", "report", "reports", "results",
-    "statement", "statements", "financial", "financials", "earnings", "release",
-    "final", "draft", "unaudited", "audited", "condensed", "consolidated",
-    "full", "year", "half", "fy", "cy", "q1", "q2", "q3", "q4", "tanshin",
-    "document", "services", "the", "and", "of", "for",
-}
-
-_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _identifying_tokens(text) -> set[str]:
-    """Words from `text` that could plausibly name a company."""
-    if not isinstance(text, str):
-        return set()
-    return {
-        tok for tok in _TOKEN_SPLIT_RE.split(text.lower())
-        if len(tok) > 1 and not tok.isdigit() and tok not in _NON_IDENTIFYING_TOKENS
-    }
-
-
-def validate_analysis(raw: dict, pdf_meta: dict | None = None) -> list[str]:
-    """Run Pydantic type checks and cross-field consistency checks on the
-    LLM output dict.  Returns a (possibly empty) list of warning strings.
-    The LLM dict is NOT mutated; warnings are purely informational.
-
-    `pdf_meta`, when supplied, additionally cross-checks the PDF's embedded
-    metadata against the company the model read out of the document body."""
-
-    warnings: list[str] = []
-
-    # ---- 1. Pydantic type / coercion check ----
-    if _pydantic_available:
-        try:
-            EarningsReport(**{k: v for k, v in raw.items() if k != "analysis_error"})
-        except ValidationError as exc:
-            for err in exc.errors():
-                field = ".".join(str(x) for x in err["loc"])
-                warnings.append(f"Type error — {field}: {err['msg']}")
-    else:
-        warnings.append("pydantic not installed — type validation skipped")
-
-    r = raw  # shorthand for cross-field checks below
-
-    # ---- 2. fiscal_quarter allowed values ----
-    fq = r.get("fiscal_quarter")
-    if fq is not None and fq not in VALID_QUARTERS:
-        warnings.append(f"fiscal_quarter '{fq}' is not one of Q1/Q2/Q3/Q4")
-
-    # ---- 3. fiscal_year plausibility ----
-    fy = r.get("fiscal_year")
-    current_year = datetime.utcnow().year
-    if fy is not None:
-        try:
-            fy = int(fy)
-            if not (2000 <= fy <= current_year + 1):
-                warnings.append(
-                    f"fiscal_year {fy} is outside the expected range "
-                    f"(2000–{current_year + 1})"
-                )
-        except (ValueError, TypeError):
-            warnings.append(f"fiscal_year '{fy}' cannot be parsed as an integer")
-
-    # ---- 4. quarter_end_date format and year consistency ----
-    qed = r.get("quarter_end_date")
-    if qed is not None:
-        if not DATE_RE.match(str(qed)):
-            warnings.append(
-                f"quarter_end_date '{qed}' is not in YYYY-MM-DD format"
-            )
-        elif fy is not None:
-            date_year = int(str(qed)[:4])
-            if abs(date_year - int(fy)) > 1:
-                warnings.append(
-                    f"quarter_end_date year ({date_year}) does not match "
-                    f"fiscal_year ({fy}) — possible extraction error"
-                )
-
-    # ---- 5. currency format (ISO 4217: 3 uppercase letters) ----
-    currency = r.get("currency")
-    if currency is not None and not VALID_CURRENCY_RE.match(str(currency)):
-        warnings.append(
-            f"currency '{currency}' is not a valid ISO 4217 code "
-            f"(expected 3 uppercase letters, e.g. USD)"
-        )
-
-    # ---- 6. Revenue must be non-negative ----
-    for field in (
-        "revenue_current",
-        "revenue_previous_quarter",
-        "revenue_same_quarter_last_year",
-    ):
-        val = r.get(field)
-        if val is not None and val < 0:
-            warnings.append(
-                f"{field} is negative ({val:.2f}M) — revenue cannot be negative"
-            )
-
-    # ---- 7. PBT must not exceed revenue (when revenue is positive) ----
-    pairs = [
-        ("revenue_current",                "pbt_current"),
-        ("revenue_previous_quarter",       "pbt_previous_quarter"),
-        ("revenue_same_quarter_last_year", "pbt_same_quarter_last_year"),
-    ]
-    for rev_field, pbt_field in pairs:
-        rev = r.get(rev_field)
-        pbt = r.get(pbt_field)
-        if rev is not None and pbt is not None and rev > 0 and pbt > rev:
-            warnings.append(
-                f"{pbt_field} ({pbt:.2f}M) exceeds {rev_field} ({rev:.2f}M) "
-                f"— unusual, though legitimate with one-off gains such as asset "
-                f"disposals or revaluations; confirm against the report"
-            )
-
-    # ---- 8. confidence_score bounds ----
-    score = r.get("confidence_score")
-    if score is not None:
-        try:
-            score = float(score)
-            if not (0.0 <= score <= 1.0):
-                warnings.append(
-                    f"confidence_score {score} is outside the valid range [0, 1]"
-                )
-            elif score < 0.7:
-                warnings.append(
-                    f"Low confidence score ({score:.0%}) — results should be "
-                    f"reviewed manually"
-                )
-        except (ValueError, TypeError):
-            warnings.append(f"confidence_score '{score}' cannot be parsed as a number")
-
-    # ---- 9. No financial values extracted at all ----
-    if all(r.get(f) is None for f in MONETARY_FIELDS):
-        warnings.append(
-            "No financial values were extracted — the PDF may not contain "
-            "machine-readable financial tables"
-        )
-
-    # ---- 10. PDF metadata contradicts the document body ----
-    # A repurposed template, a mislabelled export or a deliberately misleading
-    # file shows up here: the embedded title/author names one company while the
-    # body reports another. Deterministic, unlike the model's self-reported
-    # confidence, which stays high even on the adversarial fixture.
-    if pdf_meta:
-        company_tokens = _identifying_tokens(r.get("company_name"))
-        meta_text = " ".join(
-            str(pdf_meta.get(key) or "") for key in ("title", "author")
-        )
-        meta_tokens = _identifying_tokens(meta_text)
-        if company_tokens and meta_tokens and not (company_tokens & meta_tokens):
-            warnings.append(
-                f"Document metadata names a different entity than the report body "
-                f"(metadata: '{meta_text.strip()}', extracted: "
-                f"'{r.get('company_name')}') — verify the file is the report it "
-                f"claims to be"
-            )
-
-    return warnings
 
 
 # ---------- OpenAI ----------
@@ -2161,6 +1927,25 @@ def locate_pending_file(filename: str, db=None,
     return None
 
 
+def _remove_quietly(path: str | None, what: str = "file") -> bool:
+    """Delete a file, reporting rather than raising if it cannot be removed.
+
+    Every caller deletes files as housekeeping *after* the database change that
+    matters has already committed. Letting a failed unlink propagate turned a
+    successful approval into a 500 and skipped the pending-row cleanup that
+    followed it — so the entry was approved and still showed as awaiting review.
+    Windows raises exactly this when a reader still holds the file open.
+    """
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError as exc:
+        print(f"[WARNING] Could not remove {what} {path}: {exc}")
+        return False
+
+
 def _duplicate_response(result: dict):
     """Map a duplicate result from ingest_pdf_bytes() onto the 409 body the
     frontend already knows how to render."""
@@ -2217,6 +2002,7 @@ def list_discovered():
         """SELECT a.id, a.filename, a.file_size, a.verification_status,
                   a.verification_detail, a.downloaded_at, a.local_path,
                   n.title, n.announced_at, n.url AS announcement_url,
+                  n.status AS announcement_status,
                   c.stock_code, c.name AS company_name,
                   (SELECT COUNT(*) FROM pending_reviews p
                     WHERE p.source_attachment_id = a.id) AS pending_count
@@ -2229,7 +2015,15 @@ def list_discovered():
     out = []
     for row in rows:
         item = dict(row)
-        item["extracted"] = bool(item.pop("pending_count"))
+        # A pending row is deleted on approval, so its absence cannot mean "still
+        # needs extracting" — that made a finished filing reappear as Verified /
+        # Extract (uses API credit). announcements.status is set to 'extracted'
+        # when the button is pressed and survives the handover, so the two
+        # signals together cover in-flight and completed work alike. Both are
+        # popped unconditionally: short-circuiting would leak the raw column.
+        item["in_pending"] = bool(item.pop("pending_count"))
+        was_extracted = item.pop("announcement_status", None) == "extracted"
+        item["extracted"] = item["in_pending"] or was_extracted
         item["available"] = (
             item["verification_status"] == "verified"
             and not item["extracted"]
@@ -2445,9 +2239,15 @@ def approve_pending(pending_id):
     record_review_event(db, "approved", new_id, "approved",
                         note=f"Promoted from pending #{pending_id}")
 
-    # Clean up the draft report and the pending record now it's been promoted
-    if row["report_path"] and os.path.exists(row["report_path"]):
-        os.remove(row["report_path"])
+    # Clean up the draft report and the pending record now it's been promoted.
+    #
+    # Deleting the draft is housekeeping and must never fail the approval. The
+    # row is already committed to pdf_metadata by this point, so an exception
+    # here returned a 500 for an approval that had in fact succeeded — and left
+    # the pending row behind, so the same filing showed up as still awaiting
+    # review. Windows raises exactly this when the draft is still held open by a
+    # reader that has not released it yet.
+    _remove_quietly(row["report_path"], "draft report")
     db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
     db.commit()
 
@@ -2601,12 +2401,11 @@ def delete_pending(pending_id):
         with open(path, "rb") as f:
             on_disk = hashlib.sha256(f.read()).hexdigest()
         if on_disk == row["sha256"]:
-            os.remove(path)
+            _remove_quietly(path, "source PDF")
         else:
             print(f"[WARNING] Not deleting {path}: its contents do not match "
                   f"pending review #{pending_id}. Leaving it in place.")
-    if row["report_path"] and os.path.exists(row["report_path"]):
-        os.remove(row["report_path"])
+    _remove_quietly(row["report_path"], "draft report")
     record_review_event(db, "pending", pending_id, "discarded",
                         note=f"Discarded {row['filename']} without saving")
     db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
@@ -2664,11 +2463,8 @@ def delete_pdf(pdf_id):
     ).fetchone()
     if not row:
         return jsonify({"error": "Not found"}), 404
-    path = os.path.join(UPLOAD_FOLDER, row["filename"])
-    if os.path.exists(path):
-        os.remove(path)
-    if row["report_path"] and os.path.exists(row["report_path"]):
-        os.remove(row["report_path"])
+    _remove_quietly(locate_pending_file(row["filename"]), "source PDF")
+    _remove_quietly(row["report_path"], "report")
     db.execute("DELETE FROM pdf_metadata WHERE id = ?", (pdf_id,))
     db.commit()
     return jsonify({"deleted": pdf_id})
