@@ -39,7 +39,7 @@ def _tokens(text) -> set[str]:
     "Berhad", "Ltd", "Holdings" and friends are dropped consistently in both
     places. Imported lazily to keep this module free of a Flask import and to
     avoid a cycle once app.py imports the bursa package."""
-    from app import _identifying_tokens
+    from validation import _identifying_tokens
     return _identifying_tokens(text)
 
 

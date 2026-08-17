@@ -1,0 +1,175 @@
+"""Checking the model's unit arithmetic against the document itself.
+
+EARNINGS_SYSTEM_PROMPT asks the model to normalise every monetary value to
+millions, and it reliably reports the document's own unit label in unit_raw —
+but it gets the arithmetic wrong often enough to matter. A "¥ million" report
+came back 1000x low (49.8 for a printed 49,800) and a "$ '000" one did the same.
+
+The as-printed figures are still in the PDF text, so we can check the model's
+arithmetic against the document. A scale slip is systematic — every field is off
+by the same factor — so each candidate factor is scored by how many of the six
+figures it can locate in the source, and only a clear win is acted on.
+
+Split out of app.py so bursa/verify.py can reuse the self-report check without
+importing Flask.
+"""
+from __future__ import annotations
+
+import math
+import re
+
+from validation import MONETARY_FIELDS
+
+# Maps a unit label to the multiplier that converts an as-printed figure into millions.
+_UNIT_PATTERNS = (
+    (re.compile(r"'000|’000|\b(?:thousands?|000s|k)\b", re.I), 1e-3),
+    (re.compile(r"\b(?:billions?|bn|b)\b", re.I),              1e3),
+    (re.compile(r"\b(?:millions?|mn|mm|m)\b", re.I),           1.0),
+)
+
+_SCALE_CANDIDATES = (1, 1000, 0.001)
+
+# A match only counts as evidence when the as-printed figure is big enough to be
+# distinctive. Small figures like "0.3" or a bare "0" occur all over any document,
+# so matching one confirms nothing. This matters most for the 0.001 candidate: when
+# the unit is "'000" the factor is also 0.001, so that candidate predicts a printed
+# form identical to the model's own output. Feed the tool one of its own generated
+# review reports — which prints values already normalised to millions under a
+# "Unit as reported: $ '000" header — and the check confirms itself, rescaling
+# correct figures into oblivion. Requiring a distinctive magnitude breaks the loop.
+_MIN_ANCHOR_MAGNITUDE = 100
+
+# Share of the present figures that must anchor before a correction is applied.
+_ANCHOR_QUORUM = 2 / 3
+
+# Marker that a PDF is one of our own generated review reports rather than a
+# source earnings document. Must stay in sync with generate_report_pdf().
+_SELF_REPORT_MARKER = "Auto-generated from a GPT-5.4-mini extraction of entry #"
+
+# The audit needs the source text, so anywhere that re-validates an already-stored
+# record (the approval path) cannot regenerate these and must carry them forward.
+_AUDIT_WARNING_PREFIXES = (
+    "Unit scale corrected:",
+    "Unit label ",
+    "None of the extracted figures",
+    "This document appears to be a review report",
+)
+
+# Warnings that need the source text to regenerate, so the approve path — which
+# no longer has it — must carry them forward rather than silently dropping them.
+_SOURCE_ONLY_WARNING_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(p) for p in _AUDIT_WARNING_PREFIXES) + r")"
+    r"|^\d+ of \d+ figures could not be traced"
+)
+
+
+def _scale_factor(unit_raw) -> float | None:
+    """Multiplier turning a figure printed under `unit_raw` into millions.
+    None when the label is missing or unrecognised."""
+    if not isinstance(unit_raw, str):
+        return None
+    for pattern, factor in _UNIT_PATTERNS:
+        if pattern.search(unit_raw):
+            return factor
+    return None
+
+
+def _printed_forms(value: float) -> list[str]:
+    """Plausible ways `value` could be typeset in a financial table. Sign is
+    dropped — negatives are commonly printed in parentheses."""
+    v = abs(value)
+    if abs(v - round(v)) < 0.005:
+        n = int(round(v))
+        return [f"{n:,}", str(n)]
+    return [f"{v:,.1f}", f"{v:,.2f}", f"{v:.1f}", f"{v:.2f}"]
+
+
+def _anchored(form: str, text: str) -> bool:
+    """True when `form` appears in `text` as a standalone figure rather than a
+    fragment of a longer one — so "340" does not match inside "340,000"."""
+    return re.search(rf"(?<![\d,.]){re.escape(form)}(?![\d,.])", text) is not None
+
+
+def _count_anchors(values: list[float], factor: float, shift: float, text: str) -> int:
+    """How many of `values`, rescaled by `shift` and converted back to as-printed
+    form, can actually be found in the document text. Figures too small to be
+    distinctive are not counted either way — see _MIN_ANCHOR_MAGNITUDE."""
+    total = 0
+    for v in values:
+        printed = abs(v * shift / factor)
+        if printed < _MIN_ANCHOR_MAGNITUDE:
+            continue
+        if any(_anchored(form, text) for form in _printed_forms(printed)):
+            total += 1
+    return total
+
+
+def _self_generated_report_warning(pdf_text: str) -> list[str]:
+    """Flag a PDF that is one of this tool's own review reports. Its figures are
+    already normalised to millions while its header still quotes the original
+    unit label, so re-extracting it yields numbers that look wrong in both
+    directions."""
+    if pdf_text and _SELF_REPORT_MARKER in pdf_text:
+        return [
+            "This document appears to be a review report generated by this tool, "
+            "not an original earnings report — its figures are already normalised "
+            "to millions, so the extracted values and unit label may disagree. "
+            "Upload the source report instead"
+        ]
+    return []
+
+
+def _audit_unit_scale(raw: dict, pdf_text: str) -> tuple[dict, list[str]]:
+    """Verify the model's unit normalisation against the figures printed in the
+    source document, correcting a systematic scale error when the document
+    confirms one. Mutates and returns `raw`, plus any warnings.
+
+    Correction is all-or-nothing across the six monetary fields: a partial
+    rescale would be worse than none. It requires the winning factor to beat
+    the model's own arithmetic outright, to anchor at least three figures, and
+    to carry a two-thirds majority of the figures actually present."""
+    warnings: list[str] = []
+    present = [
+        (field, float(raw[field]))
+        for field in MONETARY_FIELDS
+        if isinstance(raw.get(field), (int, float))
+    ]
+    if not present or not pdf_text:
+        return raw, warnings
+
+    unit_raw = raw.get("unit_raw")
+    factor = _scale_factor(unit_raw)
+    if factor is None:
+        warnings.append(
+            f"Unit label {unit_raw!r} was not recognised — normalisation to "
+            f"millions could not be verified against the document"
+        )
+        return raw, warnings
+
+    values = [v for _, v in present]
+    scores = {
+        shift: _count_anchors(values, factor, shift, pdf_text)
+        for shift in _SCALE_CANDIDATES
+    }
+    # Ties go to the model's own arithmetic; we only override on a clear win.
+    best = max(_SCALE_CANDIDATES, key=lambda s: (scores[s], s == 1))
+
+    quorum = max(3, math.ceil(len(present) * _ANCHOR_QUORUM))
+    if best == 1 or scores[best] <= scores[1] or scores[best] < quorum:
+        if max(scores.values()) == 0:
+            warnings.append(
+                f"None of the extracted figures could be matched against the "
+                f"document text (unit as reported: {unit_raw}) — the scale is "
+                f"unverified and should be checked manually"
+            )
+        return raw, warnings
+
+    for field, value in present:
+        raw[field] = value * best
+    warnings.append(
+        f"Unit scale corrected: figures were rescaled by {best:g}x to match the "
+        f"document (unit as reported: {unit_raw}). {scores[best]} of "
+        f"{len(present)} figures now match the printed source, against "
+        f"{scores[1]} before — please verify against the original report"
+    )
+    return raw, warnings
