@@ -225,6 +225,27 @@ calls a time.
 warns when used. Do not expose this to a network you do not control without putting authentication
 in front of it.
 
+## Unreviewed generated reports were committed and pushed
+
+`reports/report_35.pdf` … `report_39.pdf` held generated review reports for **Sunway Berhad, a
+real listed Malaysian company**, produced by the old GPT-4o-mini pipeline. They have no matching
+`pdf_metadata` rows, which means **no human ever approved them** — they are drafts. `report_35.pdf`
+also carries the tool's own validation warning that PBT (RM9,558.2M) exceeds revenue
+(RM2,557.5M), alongside a +3043% YoY figure.
+
+That combination — machine-generated financial figures about a named real company, flagged by our
+own validation, never reviewed, and committed to a public repository — is a direct breach of two
+non-negotiables in `CLAUDE.md`: human review is mandatory, and nothing leaves this machine without
+a human action.
+
+**Done:** `reports/` is now in `.gitignore` and the five files are untracked, so nothing further is
+published and the next push removes them from the repository tree.
+
+**Not done, and a decision for the operator:** the files remain in **pushed history** on
+`origin/main` and also on `upstream/main` (the fork source). Removing them from history needs a
+rewrite and a force-push, and scrubbing this fork does not remove them from upstream. This repo has
+had one history scrub before, for `.env`, so the playbook exists.
+
 ## Open findings, not yet fixed
 
 From the adversarial review of 2026-08-17. Real, verified, and bounded:

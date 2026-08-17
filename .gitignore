@@ -19,6 +19,13 @@ uploads/
 attachments/
 bursa_cache/
 
+# Generated review reports. These contain extracted financial figures about
+# real named companies and are produced BEFORE a human has reviewed them, so
+# they must never be committed — the whole product rule is that nothing leaves
+# this machine without a human action. reports/report_35..39.pdf were tracked
+# and pushed before this rule was enforced; see docs/PROJECT_STATE.md.
+reports/
+
 # Generated knowledge graph (rebuild with /graphify)
 graphify-out/
 
