@@ -421,8 +421,11 @@ check("no socket was opened during the suite", not _sockets_opened, str(_sockets
 # Imported last, deliberately, so the checks above prove the parsing and dedup
 # layers never pull in the networking module. Nothing here makes a request:
 # robots reading is stubbed to fail, which is the path being tested.
-from bursa.client import BlockedError, BursaClient, BursaClientError  # noqa: E402
+from bursa.client import (BlockedError, BursaClient, BursaClientError,  # noqa: E402
+                          HostBudgetExceeded, RequestBudgetExceeded,
+                          _safe_cache_name)
 import io  # noqa: E402
+import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
@@ -538,6 +541,266 @@ check("request cap cannot be raised", BursaClient(max_requests=10_000).max_reque
 check("user agent identifies the tool and a contact",
       "EarningsBrief" in BursaClient().user_agent and "@" in BursaClient().user_agent,
       BursaClient().user_agent)
+
+# ---- one client, more than one host ----------------------------------------
+# robots.txt is defined per host, but the client held ONE parser, one crawl
+# delay and one clock. Python's RobotFileParser cannot notice: can_fetch()
+# rebuilds the URL as urlunparse(('', '', path, params, query, fragment)) — the
+# scheme and hostname are discarded — so a parser loaded from Bursa answers
+# confidently, and permissively, about anybody else's site.
+#
+# Every host below is under .example (RFC 2606: never resolvable) and urlopen is
+# stubbed, so nothing here can reach a network even if the guard were removed.
+ALPHA = "https://ir.alpha.example"
+BETA = "https://ir.beta.example"
+
+
+def _stub_router(routes):
+    """urlopen stand-in that answers by URL. Anything not declared 404s, so a
+    test can only pass by asking for exactly what it said it would."""
+    seen = []
+
+    def opener(request, timeout=None):
+        seen.append(request.full_url)
+        result = routes.get(request.full_url)
+        if result is None:
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+        if isinstance(result, Exception):
+            raise result
+        return _FakeResponse(result)
+
+    return opener, seen
+
+
+print("\neach host is judged by its OWN robots.txt")
+opener, seen = _stub_router({
+    ALPHA + "/robots.txt": b"User-agent: *\nDisallow: /private/\nCrawl-delay: 5\n",
+    BETA + "/robots.txt": b"User-agent: *\nDisallow: /reports/\n",
+})
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(base_url=ALPHA)
+    check("alpha permits /reports/, and alpha's rules are what decide it",
+          client._robots_allows(ALPHA + "/reports/q2.pdf"))
+    check("beta's own Disallow is honoured on beta",
+          not client._robots_allows(BETA + "/reports/q2.pdf"),
+          "the regression: alpha's parser answered for beta, and answered yes")
+    check("alpha's Disallow does not travel to beta",
+          client._robots_allows(BETA + "/private/q2.pdf"))
+    check("  while it still binds on alpha",
+          not client._robots_allows(ALPHA + "/private/q2.pdf"))
+    check("each host's rules were read from that host, exactly once",
+          seen == [ALPHA + "/robots.txt", BETA + "/robots.txt"], str(seen))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\na robots failure on one host does not silence the others")
+opener, seen = _stub_router({
+    ALPHA + "/robots.txt": urllib.error.URLError("alpha is down"),
+    BETA + "/robots.txt": b"User-agent: *\nDisallow: /private/\n",
+})
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(base_url=ALPHA)
+    refusals = 0
+    for _ in range(4):
+        try:
+            client._robots_allows(ALPHA + "/x.pdf")
+        except BursaClientError:
+            refusals += 1
+    check("alpha is refused while its rules are unreadable", refusals == 4, str(refusals))
+    check("and the refusal is sticky for alpha — robots.txt is read once",
+          seen.count(ALPHA + "/robots.txt") == 1, str(seen))
+    check("but beta is still judged on its own rules",
+          client._robots_allows(BETA + "/reports/q2.pdf"))
+    check("  including beta's own Disallow",
+          not client._robots_allows(BETA + "/private/q2.pdf"))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\ncrawl-delay is per host, and can only slow us down")
+opener, seen = _stub_router({
+    ALPHA + "/robots.txt": b"User-agent: *\nCrawl-delay: 5\n",
+    BETA + "/robots.txt": b"User-agent: *\nCrawl-delay: 0.1\n",
+})
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(base_url=ALPHA)
+    client._robots_allows(ALPHA + "/x")
+    client._robots_allows(BETA + "/x")
+    check("alpha's stated 5s is taken", client.delay_for(ALPHA + "/x") == 5.0,
+          str(client.delay_for(ALPHA + "/x")))
+    check("beta cannot talk us below our own 2s floor",
+          client.delay_for(BETA + "/x") == 2.0, str(client.delay_for(BETA + "/x")))
+    check("and alpha's slower pace did not leak onto beta either",
+          client.delay_for(BETA + "/x") != 5.0, str(client.delay_for(BETA + "/x")))
+    check("min_delay still reports the base host's pace, as poll_bursa prints it",
+          client.min_delay == 5.0, str(client.min_delay))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\nan unreasonable crawl-delay skips the host rather than being shortened")
+opener, seen = _stub_router({ALPHA + "/robots.txt": b"User-agent: *\nCrawl-delay: 3600\n"})
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(base_url=ALPHA)
+    raised = None
+    try:
+        client._robots_allows(ALPHA + "/x")
+    except BursaClientError as exc:
+        raised = exc
+    check("the host is refused, and the message says why",
+          raised is not None and "3600" in str(raised), repr(raised))
+    check("we never answer an inconvenient request by going faster",
+          client.delay_for(ALPHA + "/x") >= 2.0, str(client.delay_for(ALPHA + "/x")))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+print("\nwaiting on one host does not delay a request to another")
+opener, seen = _stub_router({
+    ALPHA + "/robots.txt": b"User-agent: *\nCrawl-delay: 5\n",
+    BETA + "/robots.txt": b"User-agent: *\n",
+    ALPHA + "/a1": b"a1", ALPHA + "/a2": b"a2", BETA + "/b1": b"b1",
+})
+slept = []
+_real_sleep = time.sleep
+urllib.request.urlopen = opener
+time.sleep = slept.append          # record the gap instead of living through it
+try:
+    client = BursaClient(base_url=ALPHA)
+    client.fetch(ALPHA + "/a1")
+    check("the first alpha fetch waits alpha's 5s (its robots.txt was a request too)",
+          len(slept) == 1 and 4.0 < slept[0] <= 5.0, str(slept))
+    client.fetch(BETA + "/b1")
+    check("beta then waits its OWN 2s floor, not alpha's 5s",
+          len(slept) == 2 and 1.0 < slept[1] <= 2.0, str(slept))
+    client.fetch(ALPHA + "/a2")
+    check("and alpha's next turn is alpha's 5s again",
+          len(slept) == 3 and 4.0 < slept[2] <= 5.0, str(slept))
+    check("no request ever waited on a host other than its own",
+          len(slept) == 3, str(slept))
+
+    # Isolate pacing from the robots read, so the "first request waits for
+    # nobody" rule is visible on its own.
+    slept.clear()
+    quick = BursaClient(base_url=ALPHA, respect_robots=False)
+    quick.fetch(ALPHA + "/a1")
+    check("a host's very first request waits for nobody", not slept, str(slept))
+    quick.fetch(BETA + "/b1")
+    check("and a gap owed to alpha does not hold beta up at all", not slept, str(slept))
+    quick.fetch(ALPHA + "/a2")
+    check("while alpha's own second request does wait", len(slept) == 1, str(slept))
+finally:
+    time.sleep = _real_sleep
+    urllib.request.urlopen = _real_urlopen
+
+print("\nthe request budget is accounted per host, under a run-wide ceiling")
+opener, seen = _stub_router({
+    ALPHA + "/robots.txt": b"User-agent: *\n",
+    BETA + "/robots.txt": b"User-agent: *\n",
+    ALPHA + "/a1": b"a1", ALPHA + "/a2": b"a2", BETA + "/b1": b"b1",
+})
+_real_sleep = time.sleep
+urllib.request.urlopen = opener
+time.sleep = lambda seconds: None
+try:
+    client = BursaClient(base_url=ALPHA, max_requests_per_host=1)
+    client.fetch(ALPHA + "/a1")
+    raised = None
+    try:
+        client.fetch(ALPHA + "/a2")
+    except RequestBudgetExceeded as exc:
+        raised = exc
+    check("a host that spends its share is cut off",
+          isinstance(raised, HostBudgetExceeded), repr(raised))
+    check("but the other host is still served — no starvation",
+          client.fetch(BETA + "/b1") == b"b1")
+    check("the narrow type is still a RequestBudgetExceeded, so pipeline.py "
+          "keeps catching it", issubclass(HostBudgetExceeded, RequestBudgetExceeded))
+    check("the run-wide counter still counts every host",
+          client.requests_made == 2, str(client.requests_made))
+    check("  and the spend is attributable per host",
+          client.requests_made_by_host == {ALPHA: 1, BETA: 1},
+          str(client.requests_made_by_host))
+
+    capped = BursaClient(base_url=ALPHA, max_requests=1)
+    capped.fetch(ALPHA + "/a1")
+    raised = None
+    try:
+        capped.fetch(BETA + "/b1")
+    except RequestBudgetExceeded as exc:
+        raised = exc
+    check("the run-wide ceiling still stops a run that spreads across hosts",
+          isinstance(raised, RequestBudgetExceeded), repr(raised))
+    check("  and it is the global cap that fired, not a per-host one",
+          not isinstance(raised, HostBudgetExceeded), repr(raised))
+finally:
+    time.sleep = _real_sleep
+    urllib.request.urlopen = _real_urlopen
+
+print("\nsaved responses cannot overwrite each other across hosts")
+# The old name sanitised the whole URL and kept the last 120 characters — and
+# the host is at the front, i.e. the first thing that truncation dropped.
+LONG_PATH = "/market_information/announcements/company_announcement/" + "q" * 140 + ".pdf"
+check("two hosts serving the same long path get different names",
+      _safe_cache_name(ALPHA + LONG_PATH) != _safe_cache_name(BETA + LONG_PATH),
+      _safe_cache_name(ALPHA + LONG_PATH))
+check("the host comes first, so the folder stays greppable",
+      _safe_cache_name(ALPHA + LONG_PATH).startswith("ir.alpha.example"),
+      _safe_cache_name(ALPHA + LONG_PATH))
+check("the name stays a usable filename length",
+      len(_safe_cache_name(ALPHA + LONG_PATH)) <= 135,
+      str(len(_safe_cache_name(ALPHA + LONG_PATH))))
+check("the same URL always names the same file, so a re-run overwrites its own",
+      _safe_cache_name(ALPHA + LONG_PATH) == _safe_cache_name(ALPHA + LONG_PATH))
+
+print("\nthe host key is normalised, and a non-http link is refused outright")
+opener, seen = _stub_router({ALPHA + "/robots.txt": b"User-agent: *\nDisallow: /private/\n"})
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(base_url=ALPHA)
+    client._robots_allows(ALPHA + "/x")
+    client._robots_allows("https://IR.ALPHA.EXAMPLE/x")
+    client._robots_allows("https://ir.alpha.example:443/x")
+    check("case and the default port do not fork the state or double the traffic",
+          len(seen) == 1, str(seen))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+GAMMA_HTTPS = "https://ir.gamma.example"
+GAMMA_HTTP = "http://ir.gamma.example"
+opener, seen = _stub_router({
+    GAMMA_HTTPS + "/robots.txt": b"User-agent: *\n",
+    GAMMA_HTTP + "/robots.txt": b"User-agent: *\nDisallow: /\n",
+})
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(base_url=GAMMA_HTTPS)
+    check("https is judged by the https robots.txt",
+          client._robots_allows(GAMMA_HTTPS + "/reports/q.pdf"))
+    check("and http by its own, stricter document — the scheme is part of the key",
+          not client._robots_allows(GAMMA_HTTP + "/reports/q.pdf"))
+    check("so both documents were fetched, one each",
+          sorted(seen) == sorted([GAMMA_HTTPS + "/robots.txt", GAMMA_HTTP + "/robots.txt"]),
+          str(seen))
+finally:
+    urllib.request.urlopen = _real_urlopen
+
+opener, seen = _stub_router({})
+urllib.request.urlopen = opener
+try:
+    client = BursaClient(base_url=ALPHA)
+    refusals = 0
+    for hostile in ("file:///C:/Windows/win.ini", "ftp://ir.alpha.example/x.pdf"):
+        try:
+            client.fetch(hostile)
+        except BursaClientError:
+            refusals += 1
+    check("a link that is not http(s) is refused, never handed to urlopen",
+          refusals == 2, str(refusals))
+    check("  and nothing was requested at all", seen == [], str(seen))
+finally:
+    urllib.request.urlopen = _real_urlopen
 
 check("still no socket opened", not _sockets_opened, str(_sockets_opened))
 
